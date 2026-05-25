@@ -99,6 +99,66 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show live preview during calibration capture",
     )
 
+    mocap_parser = subparsers.add_parser("mocap", help="Run motion capture stage")
+    mocap_parser.add_argument(
+        "--mode",
+        default="realtime",
+        choices=["realtime", "capture", "capture_estimate"],
+        help="Mocap stage mode",
+    )
+    mocap_parser.add_argument(
+        "--prepare-session",
+        type=Path,
+        required=True,
+        help="Path to a prepare session directory",
+    )
+    mocap_parser.add_argument(
+        "--calib-session",
+        type=Path,
+        required=True,
+        help="Path to a calibration session directory",
+    )
+    mocap_parser.add_argument(
+        "--session-root",
+        type=Path,
+        default=Path("sessions"),
+        help="Root directory for generated sessions",
+    )
+    mocap_parser.add_argument(
+        "--fps",
+        type=float,
+        default=20.0,
+        help="Motion capture fps",
+    )
+    mocap_parser.add_argument(
+        "--frames",
+        type=int,
+        default=0,
+        help="Number of synchronized frame sets to capture, 0 means unlimited until q",
+    )
+    mocap_parser.add_argument(
+        "--no-hands",
+        action="store_true",
+        help="Disable hand landmarks",
+    )
+    mocap_parser.add_argument(
+        "--model-complexity",
+        type=int,
+        default=1,
+        choices=[0, 1, 2],
+        help="MediaPipe pose model complexity selector: 1 uses full, 2 uses heavy",
+    )
+    mocap_parser.add_argument(
+        "--show-preview",
+        action="store_true",
+        help="Show live mocap preview",
+    )
+    mocap_parser.add_argument(
+        "--video-dir",
+        type=Path,
+        help="Optional directory containing per-camera mp4 files for capture_estimate mode; defaults to calib session videos/",
+    )
+
     return parser
 
 
@@ -134,6 +194,53 @@ def main() -> None:
             marker_length_mm=args.marker_length_mm,
             show_preview=args.show_preview,
         )
+        return
+
+    if args.command == "mocap":
+        if args.mode == "realtime":
+            from roc.mocap.realtime import run_mocap_realtime
+
+            run_mocap_realtime(
+                prepare_session=args.prepare_session,
+                calib_session=args.calib_session,
+                session_root=args.session_root,
+                fps=args.fps,
+                max_frames=args.frames,
+                hands_enabled=not args.no_hands,
+                model_complexity=args.model_complexity,
+                show_preview=args.show_preview,
+            )
+            return
+
+        if args.mode == "capture_estimate":
+            from roc.mocap.offline import run_mocap_offline
+
+            run_mocap_offline(
+                prepare_session=args.prepare_session,
+                calib_session=args.calib_session,
+                video_dir=args.video_dir,
+                session_root=args.session_root,
+                max_frames=args.frames,
+                hands_enabled=not args.no_hands,
+                model_complexity=args.model_complexity,
+                show_preview=args.show_preview,
+            )
+            return
+
+        if args.mode == "capture":
+            from roc.mocap.capture import run_mocap_capture
+
+            run_mocap_capture(
+                prepare_session=args.prepare_session,
+                calib_session=args.calib_session,
+                session_root=args.session_root,
+                fps=args.fps,
+                max_frames=args.frames,
+                show_preview=args.show_preview,
+            )
+            return
+
+        parser.error(f"Unsupported mocap mode: {args.mode}")
         return
 
     parser.error(f"Unsupported command: {args.command}")

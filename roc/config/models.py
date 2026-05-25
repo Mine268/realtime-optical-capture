@@ -52,3 +52,18 @@ class CalibrationConfig:
     lossless: bool = False
     mode: str = "capture+solve"
     charuco: CharucoConfig = field(default_factory=CharucoConfig)
+
+
+@dataclass(slots=True)
+class MocapConfig:
+    schema_version: int
+    created_at: str
+    prepare_session: str
+    calib_session: str
+    mode: str = "realtime"
+    fps: float = 20.0
+    max_frames: int = 0
+    hands_enabled: bool = True
+    model_complexity: int = 1
+    video_format: str = "mp4"
+    lossless: bool = False

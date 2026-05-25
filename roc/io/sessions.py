@@ -30,6 +30,20 @@ class CalibrationSessionPaths:
     charuco_overlays_dir: Path
 
 
+@dataclass(slots=True)
+class MocapSessionPaths:
+    session_dir: Path
+    videos_dir: Path
+    raw_frames_dir: Path
+    logs_dir: Path
+    capture_config_path: Path
+    calibration_yaml_path: Path
+    mocap_config_path: Path
+    mocap_npz_path: Path
+    mocap_report_path: Path
+    overlay_videos_dir: Path
+
+
 def create_prepare_session(root: Path) -> PrepareSessionPaths:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     session_dir = root / f"prepare_{timestamp}"
@@ -75,4 +89,58 @@ def create_calibration_session(root: Path) -> CalibrationSessionPaths:
         calibration_report_path=session_dir / "calibration_report.yaml",
         calibration_visualization_path=session_dir / "calibration_visualization.png",
         charuco_overlays_dir=charuco_overlays_dir,
+    )
+
+
+def create_mocap_session(root: Path) -> MocapSessionPaths:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    session_dir = root / f"mocap_{timestamp}"
+    videos_dir = session_dir / "videos"
+    raw_frames_dir = session_dir / "raw_frames"
+    logs_dir = session_dir / "logs"
+    overlay_videos_dir = session_dir / "overlay_videos"
+
+    videos_dir.mkdir(parents=True, exist_ok=False)
+    raw_frames_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    overlay_videos_dir.mkdir(parents=True, exist_ok=True)
+
+    return MocapSessionPaths(
+        session_dir=session_dir,
+        videos_dir=videos_dir,
+        raw_frames_dir=raw_frames_dir,
+        logs_dir=logs_dir,
+        capture_config_path=session_dir / "capture_config.yaml",
+        calibration_yaml_path=session_dir / "calibration.yaml",
+        mocap_config_path=session_dir / "mocap_config.yaml",
+        mocap_npz_path=session_dir / f"mocap_{timestamp}.npz",
+        mocap_report_path=session_dir / "mocap_report.yaml",
+        overlay_videos_dir=overlay_videos_dir,
+    )
+
+
+def get_existing_mocap_session(session_dir: Path) -> MocapSessionPaths:
+    session_dir = session_dir.resolve()
+    videos_dir = session_dir / "videos"
+    raw_frames_dir = session_dir / "raw_frames"
+    logs_dir = session_dir / "logs"
+    overlay_videos_dir = session_dir / "overlay_videos"
+
+    videos_dir.mkdir(parents=True, exist_ok=True)
+    raw_frames_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    overlay_videos_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = session_dir.name.removeprefix("mocap_")
+    return MocapSessionPaths(
+        session_dir=session_dir,
+        videos_dir=videos_dir,
+        raw_frames_dir=raw_frames_dir,
+        logs_dir=logs_dir,
+        capture_config_path=session_dir / "capture_config.yaml",
+        calibration_yaml_path=session_dir / "calibration.yaml",
+        mocap_config_path=session_dir / "mocap_config.yaml",
+        mocap_npz_path=session_dir / f"mocap_{timestamp}.npz",
+        mocap_report_path=session_dir / "mocap_report.yaml",
+        overlay_videos_dir=overlay_videos_dir,
     )

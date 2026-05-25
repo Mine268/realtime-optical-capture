@@ -8,6 +8,7 @@ import yaml
 
 from roc.config.models import CalibrationConfig
 from roc.config.models import CameraCaptureConfig, CaptureConfig, CharucoConfig
+from roc.config.models import MocapConfig
 
 
 def capture_config_to_dict(config: CaptureConfig) -> dict[str, Any]:
@@ -130,3 +131,32 @@ def load_calibration_config(path: Path) -> CalibrationConfig:
             marker_length_mm=float(charuco["marker_length_mm"]),
         ),
     )
+
+
+def mocap_config_to_dict(config: MocapConfig) -> dict[str, Any]:
+    return {
+        "schema_version": config.schema_version,
+        "created_at": config.created_at,
+        "prepare_session": config.prepare_session,
+        "calib_session": config.calib_session,
+        "mode": config.mode,
+        "fps": config.fps,
+        "max_frames": config.max_frames,
+        "hands_enabled": config.hands_enabled,
+        "model_complexity": config.model_complexity,
+        "video": {
+            "format": config.video_format,
+            "lossless": config.lossless,
+        },
+    }
+
+
+def save_mocap_config(path: Path, config: MocapConfig) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(
+            mocap_config_to_dict(config),
+            handle,
+            sort_keys=False,
+            allow_unicode=False,
+        )
