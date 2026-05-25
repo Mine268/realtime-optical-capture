@@ -1,0 +1,5 @@
+/refs
+**/__pycache__/
+.venv/
+*.egg-info/
+sessions/

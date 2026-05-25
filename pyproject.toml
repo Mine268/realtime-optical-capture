@@ -1,0 +1,20 @@
+[project]
+name = "realtime-optical-capture"
+version = "0.1.0"
+description = "Fixed multi-view real-time optical pose estimation system"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.26",
+  "opencv-python>=4.10",
+  "PyYAML>=6.0",
+]
+
+[project.scripts]
+roc = "roc.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["roc*"]
