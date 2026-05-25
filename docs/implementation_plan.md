@@ -35,8 +35,8 @@
 
 默认 ChArUco 参数：
 
-- chessboard squares：`5 x 7`
-- dictionary：`DICT_APRILTAG_36h11`
+- chessboard squares：`7 x 5`
+- dictionary：`DICT_4X4_250`
 - square length：`190.5 mm`
 - marker length：默认 `0.8 * square_length`
 - 单位：毫米
@@ -110,8 +110,8 @@ refs/freemocap/freemocap/core_processes/capture_volume_calibration
 
 注意事项：
 
-- FreeMoCap 当前封装中的 ArUco 字典映射主要覆盖普通 `DICT_4X4_*` 到 `DICT_7X7_*`，不满足本项目默认的 `DICT_APRILTAG_36h11`。
-- 因此不能原样调用其 ChArUco wrapper，需要在本项目中封装自己的 ChArUco board/detector 配置，或对其 Anipose board 创建逻辑进行适配。
+- FreeMoCap 当前封装中的 ArUco 字典映射主要覆盖普通 `DICT_4X4_*` 到 `DICT_7X7_*`，满足当前默认的 `DICT_4X4_250`。
+- 本项目仍保留自定义 ChArUco board/detector 配置层，便于后续切换字典或做自动探测回退。
 
 ### 3.3 SMPL-X 后续对接
 
@@ -299,9 +299,9 @@ prepare_session: "../prepare_YYYYmmdd_HHMMSS"
 frames: 120
 fps: 3.0
 charuco:
-  squares_x: 5
-  squares_y: 7
-  dictionary: DICT_APRILTAG_36h11
+  squares_x: 7
+  squares_y: 5
+  dictionary: DICT_4X4_250
   square_length_mm: 190.5
   marker_length_mm: 152.4
 world:
@@ -676,4 +676,3 @@ dependencies = [
 - 实体板 marker length 是否确实为 `0.8 * square_length`。
 - Mediapipe 是否使用 GPU 加速的具体部署方式；2080Ti 可用于后续优化，但初始实现先保证 CPU/GPU 可切换。
 - 无损保存使用 PNG 序列还是原始 RAW；默认 MP4 压缩保存。
-

@@ -45,6 +45,60 @@ def build_parser() -> argparse.ArgumentParser:
         help="OpenCV preview window name",
     )
 
+    calib_parser = subparsers.add_parser("calib", help="Run camera calibration stage")
+    calib_parser.add_argument(
+        "--mode",
+        default="capture+solve",
+        choices=["capture-only", "solve-only", "capture+solve"],
+        help="Calibration stage mode",
+    )
+    calib_parser.add_argument(
+        "--prepare-session",
+        type=Path,
+        help="Path to a prepare session directory",
+    )
+    calib_parser.add_argument(
+        "--calib-session",
+        type=Path,
+        help="Path to an existing calibration session directory for solve-only mode",
+    )
+    calib_parser.add_argument("--session-root", type=Path, default=Path("sessions"), help="Root directory for generated sessions")
+    calib_parser.add_argument(
+        "--fps",
+        type=float,
+        default=3.0,
+        help="Calibration capture fps",
+    )
+    calib_parser.add_argument(
+        "--frames",
+        type=int,
+        default=120,
+        help="Number of frames to capture",
+    )
+    calib_parser.add_argument(
+        "--world-mode",
+        default="camera0",
+        choices=["camera0", "ground"],
+        help="Calibration world coordinate mode",
+    )
+    calib_parser.add_argument(
+        "--square-length-mm",
+        type=float,
+        default=190.5,
+        help="Charuco square length in millimeters",
+    )
+    calib_parser.add_argument(
+        "--marker-length-mm",
+        type=float,
+        default=152.4,
+        help="Charuco marker length in millimeters",
+    )
+    calib_parser.add_argument(
+        "--show-preview",
+        action="store_true",
+        help="Show live preview during calibration capture",
+    )
+
     return parser
 
 
@@ -62,6 +116,23 @@ def main() -> None:
             pixel_format=args.pixel_format,
             preview_scale=args.preview_scale,
             window_name=args.window_name,
+        )
+        return
+
+    if args.command == "calib":
+        from roc.calib.capture import run_calibration_capture
+
+        run_calibration_capture(
+            mode=args.mode,
+            prepare_session=args.prepare_session,
+            calib_session=args.calib_session,
+            session_root=args.session_root,
+            fps=args.fps,
+            frames=args.frames,
+            world_mode=args.world_mode,
+            square_length_mm=args.square_length_mm,
+            marker_length_mm=args.marker_length_mm,
+            show_preview=args.show_preview,
         )
         return
 

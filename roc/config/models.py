@@ -29,3 +29,26 @@ class CaptureConfig:
     lossless: bool = False
     preview_scale: float = 0.5
     cameras: list[CameraCaptureConfig] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class CharucoConfig:
+    squares_x: int = 7
+    squares_y: int = 5
+    dictionary: str = "DICT_4X4_250"
+    square_length_mm: float = 190.5
+    marker_length_mm: float = 152.4
+
+
+@dataclass(slots=True)
+class CalibrationConfig:
+    schema_version: int
+    created_at: str
+    prepare_session: str
+    frames: int = 120
+    fps: float = 3.0
+    world_mode: str = "camera0"
+    video_format: str = "mp4"
+    lossless: bool = False
+    mode: str = "capture+solve"
+    charuco: CharucoConfig = field(default_factory=CharucoConfig)
