@@ -11,7 +11,7 @@ from roc.config.models import MocapConfig
 from roc.config.yaml_io import load_capture_config, save_capture_config, save_mocap_config
 from roc.io.sessions import MocapSessionPaths, create_mocap_session
 from roc.io.video import build_mjpg_writer, encode_h264_mp4
-from roc.mocap.postprocess import postprocess_points_3d
+from roc.mocap.postprocess import RealtimePostprocessor, postprocess_points_3d
 from roc.tracking.mediapipe_tracker import HAND_LANDMARK_NAMES, POSE_LANDMARK_NAMES
 
 
@@ -98,6 +98,7 @@ def save_mocap_outputs(
     fps: float,
     hands_enabled: bool,
     model_complexity: int,
+    postprocess_mode: str = "offline",
 ) -> None:
     landmark_names = (
         POSE_LANDMARK_NAMES
@@ -105,7 +106,19 @@ def save_mocap_outputs(
         + [f"right_hand_{name}" for name in HAND_LANDMARK_NAMES]
     )
     points_3d_raw = points_3d.astype(np.float32)
-    points_3d_processed, postprocess_report = postprocess_points_3d(points_3d_raw, fps=fps)
+    if postprocess_mode == "offline":
+        points_3d_processed, postprocess_report = postprocess_points_3d(points_3d_raw, fps=fps)
+    elif postprocess_mode == "realtime":
+        online_filter = RealtimePostprocessor(
+            num_landmarks=points_3d_raw.shape[1],
+            fps=fps,
+            cutoff_hz=1.2,
+            max_hold_frames=3,
+        )
+        points_3d_processed = np.stack([online_filter.update(frame) for frame in points_3d_raw], axis=0)
+        postprocess_report = online_filter.report()
+    else:
+        raise ValueError(f"Unsupported postprocess mode: {postprocess_mode}")
     np.savez_compressed(
         session_paths.mocap_npz_path,
         timestamps=np.array(timestamps, dtype=np.int64),
@@ -130,6 +143,7 @@ def save_mocap_outputs(
                 "hands_enabled": hands_enabled,
                 "model_complexity": model_complexity,
                 "output_npz": str(session_paths.mocap_npz_path),
+                "postprocess_mode": postprocess_mode,
                 "postprocess": postprocess_report.to_dict(),
             },
             handle,

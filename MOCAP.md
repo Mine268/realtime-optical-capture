@@ -24,6 +24,7 @@ source .venv/bin/activate
 
 ```text
 models/mediapipe/
+  pose_landmarker_lite.task
   pose_landmarker_full.task
   pose_landmarker_heavy.task
   hand_landmarker.task
@@ -106,10 +107,24 @@ python -m roc.cli mocap \
 --model-complexity 2
 ```
 
+模型复杂度映射：
+
+```text
+--model-complexity 0 -> pose_landmarker_lite.task
+--model-complexity 1 -> pose_landmarker_full.task
+--model-complexity 2 -> pose_landmarker_heavy.task
+```
+
 给 `capture_estimate` 手动指定视频目录。若目录是 `sessions/mocap_*` 或 `sessions/mocap_*/videos`，结果会直接写回这个 mocap session：
 
 ```bash
 --video-dir sessions/mocap_YYYYmmdd_HHMMSS
+```
+
+在 `capture_estimate` 中模拟 realtime 后处理：
+
+```bash
+--postprocess-mode realtime
 ```
 
 ## 5. 输出说明
@@ -175,15 +190,83 @@ sessions/mocap_YYYYmmdd_HHMMSS/
 - `reprojection_error`
 - `landmark_names`
 
-`points_3d_raw` 是三角化后的原始 3D 点。`points_3d` 是主结果，会经过：
+`points_3d_raw` 是三角化后的原始 3D 点。`points_3d` 是主结果。
 
-- 速度异常点过滤：默认 `>500 mm/frame` 置为 `NaN`
-- 短 gap 插值：默认最多 `10` 帧
-- Butterworth 零相位低通：默认 `3 Hz`、`4` 阶
+默认 `capture_estimate` 使用离线高质量后处理：
 
-这些参数会写入 `mocap_report.yaml` 的 `postprocess` 字段。
+```text
+raw 3D
+-> short-gap interpolation, max_gap_frames=10
+-> zero-phase Butterworth low-pass, cutoff=1.2 Hz, order=4
+```
 
-## 7. 生成 2D overlay 视频
+该模式不做全局速度删点，适合最终数据产出，但使用 `filtfilt`，需要整段数据，不能逐帧在线输出。
+
+`realtime` 模式和 `capture_estimate --postprocess-mode realtime` 使用在线因果后处理：
+
+```text
+raw 3D
+-> short hold for missing points, max_hold_frames=3
+-> causal EMA low-pass, cutoff=1.2 Hz
+```
+
+该模式不使用未来帧，适合 realtime 输出；参数会写入 `mocap_report.yaml` 的 `postprocess` 字段。
+
+## 7. Fake Realtime
+
+可以用已经采集好的 mocap 视频模拟 realtime 姿态估计链路，用于不连接相机时测试模型速度和在线后处理效果：
+
+```bash
+python -m roc.cli mocap \
+  --mode capture_estimate \
+  --prepare-session sessions/prepare_20260525_162846 \
+  --calib-session sessions/calib_20260525_163831 \
+  --video-dir sessions/mocap_20260526_122017 \
+  --model-complexity 1 \
+  --postprocess-mode realtime
+```
+
+这会将结果写回 `--video-dir` 对应的 mocap session。
+
+## 8. Realtime Benchmark
+
+使用已录制视频测量不同 MediaPipe pose 模型复杂度在当前机器上的 fake realtime 速度：
+
+```bash
+python -m roc.mocap.benchmark_realtime \
+  --prepare-session sessions/prepare_20260525_162846 \
+  --calib-session sessions/calib_20260525_163831 \
+  --video-dir sessions/mocap_20260526_122017/videos \
+  --frames 100 \
+  --complexities 0 1 2
+```
+
+关闭手部测速：
+
+```bash
+python -m roc.mocap.benchmark_realtime \
+  --prepare-session sessions/prepare_20260525_162846 \
+  --calib-session sessions/calib_20260525_163831 \
+  --video-dir sessions/mocap_20260526_122017/videos \
+  --frames 100 \
+  --complexities 0 1 2 \
+  --no-hands
+```
+
+在 `sessions/mocap_20260526_122017/videos` 上的 100 帧测试结果：
+
+| 模型 | hands | 四路 frame-set fps |
+|---|---:|---:|
+| lite, complexity=0 | on | 6.10 |
+| full, complexity=1 | on | 6.33 |
+| heavy, complexity=2 | on | 4.17 |
+| lite, complexity=0 | off | 13.74 |
+| full, complexity=1 | off | 13.35 |
+| heavy, complexity=2 | off | 6.17 |
+
+在线后处理平均耗时小于 `0.3 ms/frame-set`，主要瓶颈是四路 MediaPipe 串行推理。
+
+## 9. 生成 2D overlay 视频
 
 `capture_estimate` 完成后会自动在 `overlay_videos/` 下生成每个相机视图的 2D 检测叠加视频：
 
@@ -206,7 +289,7 @@ python -m roc.mocap.render_2d_overlays \
   --video-dir sessions/mocap_YYYYmmdd_HHMMSS/videos
 ```
 
-## 8. 生成 3D 可视化 mp4
+## 10. 生成 3D 可视化 mp4
 
 姿态估计完成后，可以把 `mocap_*.npz` 里的 `points_3d` 渲染成 3D 骨架预览视频：
 
@@ -240,7 +323,7 @@ python -m roc.mocap.render_npz \
 
 生成的视频使用 `H.264 / yuv420p` 编码，通常可以直接在 VS Code 中打开预览。
 
-## 9. 生成 3D 重投影诊断视频
+## 11. 生成 3D 重投影诊断视频
 
 如果 3D 骨架看起来异常，可以把 3D 点重投影回四个相机视图，和原始 2D 检测直接对照：
 
@@ -276,17 +359,15 @@ python -m roc.mocap.render_reprojection_overlays \
 
 注意：三角化前会将 2D 点按 `calibration.toml` 的相机顺序重排，`mocap_*.npz` 中的 `camera_serials` 表示保存后数组实际使用的相机顺序。
 
-## 10. 说明
+## 12. 说明
 
-- `model-complexity 1` 使用 `pose_landmarker_full.task`
-- `model-complexity 2` 使用 `pose_landmarker_heavy.task`
 - 手部固定使用 `hand_landmarker.task`
 - 当前推荐优先使用 `capture_estimate` 做调试
 - 当前版本是第一版最小闭环，后续还会继续补：
   - 更强的关键点筛选
   - triangulation camera mask
 
-## 11. 如果出问题
+## 13. 如果出问题
 
 把以下内容反馈回来：
 

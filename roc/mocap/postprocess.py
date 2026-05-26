@@ -30,6 +30,90 @@ class PostprocessReport:
         }
 
 
+@dataclass(slots=True)
+class RealtimePostprocessReport:
+    cutoff_hz: float
+    fps: float
+    max_hold_frames: int
+    alpha: float
+    held_values: int
+    emitted_frames: int
+
+    def to_dict(self) -> dict[str, float | int]:
+        return {
+            "cutoff_hz": self.cutoff_hz,
+            "fps": self.fps,
+            "max_hold_frames": self.max_hold_frames,
+            "alpha": self.alpha,
+            "held_values": self.held_values,
+            "emitted_frames": self.emitted_frames,
+        }
+
+
+class RealtimePostprocessor:
+    """Causal low-latency 3D point smoother for realtime output.
+
+    It never uses future frames. Missing points are held briefly to bridge tiny
+    gaps, then marked NaN. Valid points are filtered with a first-order IIR
+    low-pass equivalent to exponential moving average.
+    """
+
+    def __init__(self, num_landmarks: int, fps: float, cutoff_hz: float = 1.2, max_hold_frames: int = 3) -> None:
+        self.num_landmarks = num_landmarks
+        self.fps = float(max(fps, 1.0))
+        self.cutoff_hz = float(max(cutoff_hz, 0.0))
+        self.max_hold_frames = max(0, int(max_hold_frames))
+        self.alpha = _ema_alpha(self.fps, self.cutoff_hz)
+        self._state = np.full((num_landmarks, 3), np.nan, dtype=np.float32)
+        self._last_valid = np.full((num_landmarks, 3), np.nan, dtype=np.float32)
+        self._missing_counts = np.full((num_landmarks,), self.max_hold_frames + 1, dtype=np.int32)
+        self._held_values = 0
+        self._emitted_frames = 0
+
+    def update(self, points_3d: np.ndarray) -> np.ndarray:
+        if points_3d.shape != (self.num_landmarks, 3):
+            raise ValueError(f"Expected points shape {(self.num_landmarks, 3)}, got {points_3d.shape}")
+
+        output = np.full_like(points_3d, np.nan, dtype=np.float32)
+        valid = np.isfinite(points_3d).all(axis=1)
+
+        for landmark_index in range(self.num_landmarks):
+            if valid[landmark_index]:
+                current = points_3d[landmark_index].astype(np.float32)
+                if np.isfinite(self._state[landmark_index]).all():
+                    self._state[landmark_index] = (
+                        self.alpha * current + (1.0 - self.alpha) * self._state[landmark_index]
+                    ).astype(np.float32)
+                else:
+                    self._state[landmark_index] = current
+                self._last_valid[landmark_index] = self._state[landmark_index]
+                self._missing_counts[landmark_index] = 0
+                output[landmark_index] = self._state[landmark_index]
+                continue
+
+            self._missing_counts[landmark_index] += 1
+            if self._missing_counts[landmark_index] <= self.max_hold_frames and np.isfinite(
+                self._last_valid[landmark_index]
+            ).all():
+                output[landmark_index] = self._last_valid[landmark_index]
+                self._held_values += 1
+            else:
+                self._state[landmark_index] = np.nan
+
+        self._emitted_frames += 1
+        return output
+
+    def report(self) -> RealtimePostprocessReport:
+        return RealtimePostprocessReport(
+            cutoff_hz=self.cutoff_hz,
+            fps=self.fps,
+            max_hold_frames=self.max_hold_frames,
+            alpha=self.alpha,
+            held_values=self._held_values,
+            emitted_frames=self._emitted_frames,
+        )
+
+
 def postprocess_points_3d(
     points_3d: np.ndarray,
     fps: float,
@@ -60,6 +144,14 @@ def postprocess_points_3d(
         butterworth_filtered=butterworth_applied,
     )
     return filtered, report
+
+
+def _ema_alpha(fps: float, cutoff_hz: float) -> float:
+    if cutoff_hz <= 0:
+        return 1.0
+    dt = 1.0 / max(fps, 1.0)
+    tau = 1.0 / (2.0 * np.pi * cutoff_hz)
+    return float(dt / (tau + dt))
 
 
 def _remove_velocity_outliers(points_3d: np.ndarray, threshold_mm: float) -> int:

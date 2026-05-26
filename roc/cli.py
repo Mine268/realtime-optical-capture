@@ -158,6 +158,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Optional directory containing per-camera mp4 files for capture_estimate mode; defaults to calib session videos/",
     )
+    mocap_parser.add_argument(
+        "--postprocess-mode",
+        default="offline",
+        choices=["offline", "realtime"],
+        help="Postprocess mode for capture_estimate: offline uses zero-phase batch filtering, realtime uses causal online filtering",
+    )
 
     return parser
 
@@ -224,6 +230,7 @@ def main() -> None:
                 hands_enabled=not args.no_hands,
                 model_complexity=args.model_complexity,
                 show_preview=args.show_preview,
+                postprocess_mode=args.postprocess_mode,
             )
             return
 

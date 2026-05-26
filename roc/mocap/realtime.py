@@ -16,6 +16,7 @@ from roc.mocap.common import build_temp_video_writer, finalize_videos_with_actua
 from roc.mocap.logging_utils import tee_to_log
 from roc.mvs import MvsSystem
 from roc.tracking.mediapipe_tracker import MediapipeTracker
+from roc.tracking.model_paths import hand_model_path, pose_model_path_for_complexity
 from roc.triangulation.cameras import camera_group_names, camera_order_indices, load_camera_group_from_toml
 from roc.triangulation.triangulate import triangulate_sequence
 
@@ -69,12 +70,12 @@ def run_mocap_realtime(
             camera_group = load_camera_group_from_toml(calibration_toml_path)
             calibrated_serials = camera_group_names(camera_group)
 
-            pose_model_path = Path("models/mediapipe/pose_landmarker_heavy.task" if model_complexity == 2 else "models/mediapipe/pose_landmarker_full.task")
-            hand_model_path = Path("models/mediapipe/hand_landmarker.task") if hands_enabled else None
+            pose_model_path = pose_model_path_for_complexity(model_complexity)
+            hand_model_path_value = hand_model_path() if hands_enabled else None
             if not pose_model_path.is_file():
                 raise RuntimeError(f"Pose model not found: {pose_model_path}")
-            if hands_enabled and (hand_model_path is None or not hand_model_path.is_file()):
-                raise RuntimeError(f"Hand model not found: {hand_model_path}")
+            if hands_enabled and (hand_model_path_value is None or not hand_model_path_value.is_file()):
+                raise RuntimeError(f"Hand model not found: {hand_model_path_value}")
 
             serial_to_cfg = {camera.serial: camera for camera in capture_config.cameras if camera.enabled}
             timestamps = []
@@ -98,7 +99,7 @@ def run_mocap_realtime(
                     serial: stack.enter_context(
                         MediapipeTracker(
                             pose_model_path=pose_model_path,
-                            hand_model_path=hand_model_path,
+                            hand_model_path=hand_model_path_value,
                             model_complexity=model_complexity,
                             hands_enabled=hands_enabled,
                         )
@@ -261,6 +262,7 @@ def run_mocap_realtime(
                 fps=actual_fps,
                 hands_enabled=hands_enabled,
                 model_complexity=model_complexity,
+                postprocess_mode="realtime",
             )
             print(f"Saved mocap session to: {session_paths.session_dir}")
         except Exception:

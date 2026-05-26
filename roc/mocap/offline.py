@@ -15,6 +15,7 @@ from roc.mocap.common import prepare_mocap_session, save_mocap_outputs
 from roc.mocap.logging_utils import tee_to_log
 from roc.mocap.render_2d_overlays import render_all_overlays
 from roc.tracking.mediapipe_tracker import MediapipeTracker
+from roc.tracking.model_paths import hand_model_path, pose_model_path_for_complexity
 from roc.triangulation.cameras import camera_group_names, camera_order_indices, load_camera_group_from_toml
 from roc.triangulation.triangulate import triangulate_sequence
 
@@ -28,6 +29,7 @@ def run_mocap_offline(
     hands_enabled: bool,
     model_complexity: int,
     show_preview: bool,
+    postprocess_mode: str = "offline",
 ) -> None:
     prepare_session = prepare_session.resolve()
     calib_session = calib_session.resolve()
@@ -88,15 +90,16 @@ def run_mocap_offline(
             print(f"Prepare session: {prepare_session}")
             print(f"Calibration session: {calib_session}")
             print(f"Output session: {session_paths.session_dir}")
+            print(f"Postprocess mode: {postprocess_mode}")
             camera_group = load_camera_group_from_toml(calibration_toml_path)
             calibrated_serials = camera_group_names(camera_group)
 
-            pose_model_path = Path("models/mediapipe/pose_landmarker_heavy.task" if model_complexity == 2 else "models/mediapipe/pose_landmarker_full.task")
-            hand_model_path = Path("models/mediapipe/hand_landmarker.task") if hands_enabled else None
+            pose_model_path = pose_model_path_for_complexity(model_complexity)
+            hand_model_path_value = hand_model_path() if hands_enabled else None
             if not pose_model_path.is_file():
                 raise RuntimeError(f"Pose model not found: {pose_model_path}")
-            if hands_enabled and (hand_model_path is None or not hand_model_path.is_file()):
-                raise RuntimeError(f"Hand model not found: {hand_model_path}")
+            if hands_enabled and (hand_model_path_value is None or not hand_model_path_value.is_file()):
+                raise RuntimeError(f"Hand model not found: {hand_model_path_value}")
 
             serial_to_video = {path.stem: path for path in source_video_dir.glob("*.mp4")}
             ordered_serials = [serial for serial in capture_config.camera_serials if serial in serial_to_video]
@@ -131,7 +134,7 @@ def run_mocap_offline(
                         serial: stack.enter_context(
                             MediapipeTracker(
                                 pose_model_path=pose_model_path,
-                                hand_model_path=hand_model_path,
+                                hand_model_path=hand_model_path_value,
                                 model_complexity=model_complexity,
                                 hands_enabled=hands_enabled,
                             )
@@ -172,6 +175,7 @@ def run_mocap_offline(
                                     model_complexity,
                                     source_video_dir,
                                     source_fps,
+                                    postprocess_mode,
                                 )
 
                             tracker = trackers[serial]
@@ -246,6 +250,7 @@ def run_mocap_offline(
                 model_complexity,
                 source_video_dir,
                 source_fps,
+                postprocess_mode,
             )
         except Exception:
             traceback.print_exc()
@@ -269,6 +274,7 @@ def _finalize(
     model_complexity,
     source_video_dir,
     source_fps,
+    postprocess_mode,
 ) -> None:
     if not timestamps:
         raise RuntimeError("No mocap frames were processed")
@@ -313,6 +319,7 @@ def _finalize(
         fps=source_fps,
         hands_enabled=hands_enabled,
         model_complexity=model_complexity,
+        postprocess_mode=postprocess_mode,
     )
     render_all_overlays(
         npz_path=session_paths.mocap_npz_path,
