@@ -8,7 +8,7 @@ from scipy.signal import butter, filtfilt
 
 @dataclass(slots=True)
 class PostprocessReport:
-    velocity_threshold_mm: float
+    velocity_threshold_mm: float | None
     max_gap_frames: int
     butterworth_cutoff_hz: float
     butterworth_order: int
@@ -17,7 +17,7 @@ class PostprocessReport:
     interpolated_values: int
     butterworth_filtered: bool
 
-    def to_dict(self) -> dict[str, float | int | bool]:
+    def to_dict(self) -> dict[str, float | int | bool | None]:
         return {
             "velocity_threshold_mm": self.velocity_threshold_mm,
             "max_gap_frames": self.max_gap_frames,
@@ -33,13 +33,15 @@ class PostprocessReport:
 def postprocess_points_3d(
     points_3d: np.ndarray,
     fps: float,
-    velocity_threshold_mm: float = 500.0,
+    velocity_threshold_mm: float | None = None,
     max_gap_frames: int = 10,
-    butterworth_cutoff_hz: float = 3.0,
+    butterworth_cutoff_hz: float = 1.2,
     butterworth_order: int = 4,
 ) -> tuple[np.ndarray, PostprocessReport]:
     filtered = points_3d.astype(np.float32, copy=True)
-    removed = _remove_velocity_outliers(filtered, velocity_threshold_mm)
+    removed = 0
+    if velocity_threshold_mm is not None:
+        removed = _remove_velocity_outliers(filtered, velocity_threshold_mm)
     interpolated = _interpolate_short_gaps(filtered, max_gap_frames)
     butterworth_applied = _butterworth_filter_in_place(
         filtered,
