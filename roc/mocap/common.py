@@ -10,16 +10,13 @@ import yaml
 from roc.config.models import MocapConfig
 from roc.config.yaml_io import load_capture_config, save_capture_config, save_mocap_config
 from roc.io.sessions import MocapSessionPaths, create_mocap_session
+from roc.io.video import build_mjpg_writer, encode_h264_mp4
+from roc.mocap.postprocess import postprocess_points_3d
 from roc.tracking.mediapipe_tracker import HAND_LANDMARK_NAMES, POSE_LANDMARK_NAMES
 
 
 def build_temp_video_writer(path: Path, frame_width: int, frame_height: int, fps_hint: float) -> cv2.VideoWriter:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fourcc = cv2.VideoWriter_fourcc(*"MJPG")
-    writer = cv2.VideoWriter(str(path), fourcc, max(fps_hint, 1.0), (frame_width, frame_height))
-    if not writer.isOpened():
-        raise RuntimeError(f"Failed to open temporary mocap video writer: {path}")
-    return writer
+    return build_mjpg_writer(path, frame_width, frame_height, fps_hint)
 
 
 def finalize_videos_with_actual_fps(
@@ -36,26 +33,10 @@ def finalize_videos_with_actual_fps(
     actual_fps = max(actual_fps, 1.0)
 
     for serial, temp_path in temp_video_paths.items():
-        cap = cv2.VideoCapture(str(temp_path))
-        if not cap.isOpened():
-            raise RuntimeError(f"Failed to reopen temporary mocap video: {temp_path}")
         final_path = final_video_dir / f"{serial}.mp4"
-        writer = None
         try:
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                if writer is None:
-                    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                    writer = cv2.VideoWriter(str(final_path), fourcc, actual_fps, (frame.shape[1], frame.shape[0]))
-                    if not writer.isOpened():
-                        raise RuntimeError(f"Failed to open final mocap video writer: {final_path}")
-                writer.write(frame)
+            encode_h264_mp4(temp_path, final_path, actual_fps)
         finally:
-            cap.release()
-            if writer is not None:
-                writer.release()
             temp_path.unlink(missing_ok=True)
 
     return actual_fps
@@ -103,6 +84,7 @@ def prepare_mocap_session(
 def save_mocap_outputs(
     session_paths: MocapSessionPaths,
     capture_config,
+    camera_serials: list[str] | None,
     timestamps,
     pose_2d_np: np.ndarray,
     pose_conf_np: np.ndarray,
@@ -122,10 +104,12 @@ def save_mocap_outputs(
         + [f"left_hand_{name}" for name in HAND_LANDMARK_NAMES]
         + [f"right_hand_{name}" for name in HAND_LANDMARK_NAMES]
     )
+    points_3d_raw = points_3d.astype(np.float32)
+    points_3d_processed, postprocess_report = postprocess_points_3d(points_3d_raw, fps=fps)
     np.savez_compressed(
         session_paths.mocap_npz_path,
         timestamps=np.array(timestamps, dtype=np.int64),
-        camera_serials=np.array(capture_config.camera_serials, dtype=object),
+        camera_serials=np.array(camera_serials or capture_config.camera_serials, dtype=object),
         pose_2d=pose_2d_np,
         pose_confidence=pose_conf_np,
         left_hand_2d=left_hand_2d_np,
@@ -133,7 +117,8 @@ def save_mocap_outputs(
         right_hand_2d=right_hand_2d_np,
         right_hand_confidence=right_hand_conf_np,
         bboxes_2d=bboxes_np,
-        points_3d=points_3d.astype(np.float32),
+        points_3d=points_3d_processed.astype(np.float32),
+        points_3d_raw=points_3d_raw,
         reprojection_error=reprojection.astype(np.float32),
         landmark_names=np.array(landmark_names, dtype=object),
     )
@@ -145,6 +130,7 @@ def save_mocap_outputs(
                 "hands_enabled": hands_enabled,
                 "model_complexity": model_complexity,
                 "output_npz": str(session_paths.mocap_npz_path),
+                "postprocess": postprocess_report.to_dict(),
             },
             handle,
             sort_keys=False,

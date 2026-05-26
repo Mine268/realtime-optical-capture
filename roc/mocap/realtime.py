@@ -8,16 +8,15 @@ import traceback
 
 import cv2
 import numpy as np
-import yaml
 
 from roc.config.models import MocapConfig
 from roc.config.yaml_io import load_capture_config, save_capture_config, save_mocap_config
 from roc.io.sessions import create_mocap_session
-from roc.mocap.common import build_temp_video_writer, finalize_videos_with_actual_fps
+from roc.mocap.common import build_temp_video_writer, finalize_videos_with_actual_fps, save_mocap_outputs
 from roc.mocap.logging_utils import tee_to_log
 from roc.mvs import MvsSystem
-from roc.tracking.mediapipe_tracker import HAND_LANDMARK_NAMES, POSE_LANDMARK_NAMES, MediapipeTracker
-from roc.triangulation.cameras import load_camera_group_from_toml
+from roc.tracking.mediapipe_tracker import MediapipeTracker
+from roc.triangulation.cameras import camera_group_names, camera_order_indices, load_camera_group_from_toml
 from roc.triangulation.triangulate import triangulate_sequence
 
 
@@ -68,6 +67,7 @@ def run_mocap_realtime(
             print(f"Prepare session: {prepare_session}")
             print(f"Calibration session: {calib_session}")
             camera_group = load_camera_group_from_toml(calibration_toml_path)
+            calibrated_serials = camera_group_names(camera_group)
 
             pose_model_path = Path("models/mediapipe/pose_landmarker_heavy.task" if model_complexity == 2 else "models/mediapipe/pose_landmarker_full.task")
             hand_model_path = Path("models/mediapipe/hand_landmarker.task") if hands_enabled else None
@@ -230,44 +230,38 @@ def run_mocap_realtime(
             right_hand_conf_np = np.stack(right_hand_conf, axis=1).astype(np.float32)
             bboxes_np = np.stack(bboxes, axis=1).astype(np.float32)
 
+            reorder_indices = camera_order_indices(ordered_serials, calibrated_serials)
+            pose_2d_np = pose_2d_np[reorder_indices]
+            pose_conf_np = pose_conf_np[reorder_indices]
+            left_hand_2d_np = left_hand_2d_np[reorder_indices]
+            left_hand_conf_np = left_hand_conf_np[reorder_indices]
+            right_hand_2d_np = right_hand_2d_np[reorder_indices]
+            right_hand_conf_np = right_hand_conf_np[reorder_indices]
+            bboxes_np = bboxes_np[reorder_indices]
+
             all_landmarks_2d = np.concatenate([pose_2d_np, left_hand_2d_np, right_hand_2d_np], axis=2)
             all_conf = np.concatenate([pose_conf_np, left_hand_conf_np, right_hand_conf_np], axis=2)
             all_landmarks_2d = np.where(all_conf[..., None] <= 0.1, np.nan, all_landmarks_2d)
             points_3d, reprojection = triangulate_sequence(camera_group, all_landmarks_2d)
 
-            landmark_names = (
-                POSE_LANDMARK_NAMES
-                + [f"left_hand_{name}" for name in HAND_LANDMARK_NAMES]
-                + [f"right_hand_{name}" for name in HAND_LANDMARK_NAMES]
+            save_mocap_outputs(
+                session_paths=session_paths,
+                capture_config=capture_config,
+                camera_serials=calibrated_serials,
+                timestamps=timestamps,
+                pose_2d_np=pose_2d_np,
+                pose_conf_np=pose_conf_np,
+                left_hand_2d_np=left_hand_2d_np,
+                left_hand_conf_np=left_hand_conf_np,
+                right_hand_2d_np=right_hand_2d_np,
+                right_hand_conf_np=right_hand_conf_np,
+                bboxes_np=bboxes_np,
+                points_3d=points_3d,
+                reprojection=reprojection,
+                fps=actual_fps,
+                hands_enabled=hands_enabled,
+                model_complexity=model_complexity,
             )
-            np.savez_compressed(
-                session_paths.mocap_npz_path,
-                timestamps=np.array(timestamps, dtype=np.int64),
-                camera_serials=np.array(capture_config.camera_serials, dtype=object),
-                pose_2d=pose_2d_np,
-                pose_confidence=pose_conf_np,
-                left_hand_2d=left_hand_2d_np,
-                left_hand_confidence=left_hand_conf_np,
-                right_hand_2d=right_hand_2d_np,
-                right_hand_confidence=right_hand_conf_np,
-                bboxes_2d=bboxes_np,
-                points_3d=points_3d.astype(np.float32),
-                reprojection_error=reprojection.astype(np.float32),
-                landmark_names=np.array(landmark_names, dtype=object),
-            )
-            with session_paths.mocap_report_path.open("w", encoding="utf-8") as handle:
-                yaml.safe_dump(
-                    {
-                        "frames": len(timestamps),
-                        "fps": actual_fps,
-                        "hands_enabled": hands_enabled,
-                        "model_complexity": model_complexity,
-                        "output_npz": str(session_paths.mocap_npz_path),
-                    },
-                    handle,
-                    sort_keys=False,
-                    allow_unicode=False,
-                )
             print(f"Saved mocap session to: {session_paths.session_dir}")
         except Exception:
             traceback.print_exc()

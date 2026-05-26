@@ -10,6 +10,7 @@ import yaml
 
 from roc.config.yaml_io import load_calibration_config
 from roc.io.sessions import CalibrationSessionPaths
+from roc.io.video import H264VideoWriter
 from roc.calib.visualize import save_calibration_visualization
 from aniposelib.boards import extract_points, extract_rtvecs, merge_rows, get_video_params  # type: ignore  # noqa: E402
 from aniposelib.cameras import CameraGroup  # type: ignore  # noqa: E402
@@ -298,20 +299,8 @@ def _set_charuco_board_as_groundplane(
     return camera_group, GroundPlaneResult(success=True)
 
 
-def _build_video_writer(path: Path, width: int, height: int, fps: float) -> tuple[cv2.VideoWriter | None, Path]:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    candidates = [
-        (path, "mp4v"),
-        (path, "avc1"),
-        (path.with_suffix(".avi"), "MJPG"),
-        (path.with_suffix(".avi"), "XVID"),
-    ]
-    for candidate_path, codec in candidates:
-        fourcc = cv2.VideoWriter_fourcc(*codec)
-        writer = cv2.VideoWriter(str(candidate_path), fourcc, fps, (width, height))
-        if writer.isOpened():
-            return writer, candidate_path
-    return None, path
+def _build_video_writer(path: Path, width: int, height: int, fps: float) -> H264VideoWriter:
+    return H264VideoWriter(path, width, height, fps, temp_suffix=".charuco_tmp.avi")
 
 
 def _detect_rows(
@@ -360,16 +349,15 @@ def _detect_rows(
                     cv2.LINE_AA,
                 )
                 if writer is None:
-                    writer, actual_path = _build_video_writer(
-                        overlay_output_path,
-                        frame.shape[1],
-                        frame.shape[0],
-                        fps,
-                    )
-                    if writer is None:
-                        print(f"[warn] failed to open overlay writer for {overlay_output_path}, continuing without overlay video")
-                    elif actual_path != overlay_output_path:
-                        print(f"[warn] overlay writer fallback in use: {actual_path.name}")
+                    try:
+                        writer = _build_video_writer(
+                            overlay_output_path,
+                            frame.shape[1],
+                            frame.shape[0],
+                            fps,
+                        )
+                    except RuntimeError as exc:
+                        print(f"[warn] failed to open overlay writer for {overlay_output_path}: {exc}")
                 if writer is not None:
                     writer.write(overlay)
             if corners is not None and len(corners) > 0:
@@ -384,7 +372,7 @@ def _detect_rows(
     finally:
         cap.release()
         if writer is not None:
-            writer.release()
+            writer.close()
 
     rows = board.fill_points_rows(rows)
     return rows

@@ -7,6 +7,8 @@ import time
 
 import cv2
 
+from roc.io.video import write_frames_to_h264_mp4
+
 
 @dataclass(slots=True)
 class SyncCaptureWorker:
@@ -76,21 +78,6 @@ def transcode_raw_frames_to_videos(
         frame_paths = sorted(raw_dir.glob("frame_*.bmp"))
         if not frame_paths:
             raise RuntimeError(f"No raw frames found for camera {serial} in {raw_dir}")
-        writer = None
-        try:
-            for frame_path in frame_paths:
-                frame = cv2.imread(str(frame_path), cv2.IMREAD_COLOR)
-                if frame is None:
-                    raise RuntimeError(f"Failed to read raw frame: {frame_path}")
-                if writer is None:
-                    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                    video_path = final_video_dir / f"{serial}.mp4"
-                    writer = cv2.VideoWriter(str(video_path), fourcc, actual_fps, (frame.shape[1], frame.shape[0]))
-                    if not writer.isOpened():
-                        raise RuntimeError(f"Failed to open final mocap video writer: {video_path}")
-                writer.write(frame)
-        finally:
-            if writer is not None:
-                writer.release()
+        write_frames_to_h264_mp4(frame_paths, final_video_dir / f"{serial}.mp4", actual_fps)
 
     return actual_fps

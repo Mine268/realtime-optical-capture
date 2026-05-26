@@ -11,6 +11,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+from roc.io.video import build_mjpg_writer, encode_h264_mp4
+
 
 POSE_EDGES = [
     ("nose", "left_eye"),
@@ -128,6 +130,7 @@ def main() -> None:
 
     output_path = args.output_path or args.npz_path.with_name(args.npz_path.stem + "_preview.mp4")
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_output_path = output_path.with_name(output_path.stem + ".render_tmp.avi")
 
     valid_points = points_3d[~np.isnan(points_3d).any(axis=2)]
     if valid_points.size == 0:
@@ -166,17 +169,28 @@ def main() -> None:
             image = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8).reshape(height, width, 4)
             image_bgr = cv2.cvtColor(image, cv2.COLOR_RGBA2BGR)
             if writer is None:
-                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                writer = cv2.VideoWriter(str(output_path), fourcc, args.fps, (width, height))
-                if not writer.isOpened():
-                    raise RuntimeError(f"Failed to open output video writer: {output_path}")
+                writer = build_mjpg_writer(temp_output_path, width, height, args.fps)
             writer.write(image_bgr)
     finally:
         plt.close(fig)
         if writer is not None:
             writer.release()
 
+    _encode_h264_mp4(temp_output_path, output_path, args.fps)
     print(f"Saved mocap preview video to: {output_path}")
+
+
+def _encode_h264_mp4(temp_output_path: Path, output_path: Path, fps: float) -> None:
+    try:
+        encode_h264_mp4(temp_output_path, output_path, fps)
+    except RuntimeError as exc:
+        fallback_path = output_path.with_suffix(".avi")
+        temp_output_path.replace(fallback_path)
+        raise RuntimeError(
+            f"Failed to encode H.264 mp4 with ffmpeg; fallback AVI kept at {fallback_path}"
+        ) from exc
+    else:
+        temp_output_path.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

@@ -8,17 +8,14 @@ import cv2
 from roc.config.models import CalibrationConfig, CharucoConfig
 from roc.config.yaml_io import load_calibration_config
 from roc.config.yaml_io import load_capture_config, save_calibration_config, save_capture_config
+from roc.io.video import build_mjpg_writer, encode_h264_mp4
 from roc.io.sessions import create_calibration_session
 from roc.calib.solve import run_calibration_solve
 from roc.mvs import MvsSystem
 
 
 def _build_video_writer(path: Path, frame_width: int, frame_height: int, fps: float) -> cv2.VideoWriter:
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(str(path), fourcc, fps, (frame_width, frame_height))
-    if not writer.isOpened():
-        raise RuntimeError(f"Failed to open video writer: {path}")
-    return writer
+    return build_mjpg_writer(path, frame_width, frame_height, fps)
 
 
 def run_calibration_capture(
@@ -92,6 +89,7 @@ def run_calibration_capture(
         ordered_serials = [serial for serial in capture_config.camera_serials if serial in serial_to_config]
         cameras = []
         writers = {}
+        final_video_paths = {}
         trigger_sleep = 0.0 if fps <= 0 else min(0.1, 0.5 / fps)
 
         try:
@@ -121,13 +119,16 @@ def run_calibration_capture(
                         continue
 
                     if serial not in writers:
+                        final_video_path = session_paths.videos_dir / f"{serial}.mp4"
+                        temp_video_path = final_video_path.with_name(final_video_path.stem + ".capture_tmp.avi")
                         writer = _build_video_writer(
-                            session_paths.videos_dir / f"{serial}.mp4",
+                            temp_video_path,
                             frame.shape[1],
                             frame.shape[0],
                             fps,
                         )
                         writers[serial] = writer
+                        final_video_paths[serial] = (temp_video_path, final_video_path)
                         camera_cfg.width = frame.shape[1]
                         camera_cfg.height = frame.shape[0]
 
@@ -159,6 +160,9 @@ def run_calibration_capture(
                 cv2.destroyAllWindows()
             for writer in writers.values():
                 writer.release()
+            for temp_video_path, final_video_path in final_video_paths.values():
+                encode_h264_mp4(temp_video_path, final_video_path, fps)
+                temp_video_path.unlink(missing_ok=True)
             for _, camera, _ in reversed(cameras):
                 camera.close()
 

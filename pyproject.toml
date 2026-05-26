@@ -7,6 +7,7 @@ dependencies = [
   "numpy>=1.26",
   "opencv-python>=4.10",
   "PyYAML>=6.0",
+  "scipy>=1.11",
   "tomli>=2.0; python_version < '3.11'",
 ]
 

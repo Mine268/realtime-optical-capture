@@ -124,6 +124,8 @@ sessions/calib_YYYYmmdd_HHMMSS/
     <serial>_charuco_overlay.mp4
 ```
 
+生成的 mp4 使用 `H.264 / yuv420p` 编码，通常可以直接在 VS Code 和常见播放器中打开预览。
+
 ## 5. 上机建议
 
 1. 先完成 `prepare`

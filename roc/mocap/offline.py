@@ -15,7 +15,7 @@ from roc.mocap.common import prepare_mocap_session, save_mocap_outputs
 from roc.mocap.logging_utils import tee_to_log
 from roc.mocap.render_2d_overlays import render_all_overlays
 from roc.tracking.mediapipe_tracker import MediapipeTracker
-from roc.triangulation.cameras import load_camera_group_from_toml
+from roc.triangulation.cameras import camera_group_names, camera_order_indices, load_camera_group_from_toml
 from roc.triangulation.triangulate import triangulate_sequence
 
 
@@ -35,12 +35,15 @@ def run_mocap_offline(
     if not calibration_toml_path.is_file():
         raise RuntimeError(f"Calibration toml not found: {calibration_toml_path}")
 
-    source_video_dir = video_dir.resolve() if video_dir is not None else (calib_session / "videos")
+    source_video_dir, output_session_dir = _resolve_video_dir_and_output_session(
+        video_dir=video_dir,
+        calib_session=calib_session,
+    )
     if not source_video_dir.is_dir():
         raise RuntimeError(f"Video directory not found: {source_video_dir}")
 
-    if source_video_dir.name == "videos" and source_video_dir.parent.name.startswith("mocap_"):
-        session_paths = get_existing_mocap_session(source_video_dir.parent)
+    if output_session_dir is not None:
+        session_paths = get_existing_mocap_session(output_session_dir)
         capture_config_path = prepare_session / "capture_config.yaml"
         calibration_yaml_path = calib_session / "calibration.yaml"
         if not capture_config_path.is_file():
@@ -86,6 +89,7 @@ def run_mocap_offline(
             print(f"Calibration session: {calib_session}")
             print(f"Output session: {session_paths.session_dir}")
             camera_group = load_camera_group_from_toml(calibration_toml_path)
+            calibrated_serials = camera_group_names(camera_group)
 
             pose_model_path = Path("models/mediapipe/pose_landmarker_heavy.task" if model_complexity == 2 else "models/mediapipe/pose_landmarker_full.task")
             hand_model_path = Path("models/mediapipe/hand_landmarker.task") if hands_enabled else None
@@ -99,6 +103,7 @@ def run_mocap_offline(
             if not ordered_serials:
                 raise RuntimeError(f"No matching mp4 files found in {source_video_dir}")
             print(f"Using videos: {ordered_serials}")
+            source_fps = _read_video_fps(source_video_dir)
 
             caps = []
             timestamps = []
@@ -143,7 +148,7 @@ def run_mocap_offline(
                         frame_set_right_conf = []
                         frame_set_bbox = []
                         preview_frames = []
-                        timestamp_ms = frame_index * 200
+                        timestamp_ms = round(frame_index * 1000.0 / max(source_fps, 1.0))
 
                         for serial, cap in caps:
                             ret, frame = cap.read()
@@ -162,9 +167,11 @@ def run_mocap_offline(
                                     right_hand_conf,
                                     bboxes,
                                     camera_group,
+                                    calibrated_serials,
                                     hands_enabled,
                                     model_complexity,
                                     source_video_dir,
+                                    source_fps,
                                 )
 
                             tracker = trackers[serial]
@@ -234,9 +241,11 @@ def run_mocap_offline(
                 right_hand_conf,
                 bboxes,
                 camera_group,
+                calibrated_serials,
                 hands_enabled,
                 model_complexity,
                 source_video_dir,
+                source_fps,
             )
         except Exception:
             traceback.print_exc()
@@ -255,9 +264,11 @@ def _finalize(
     right_hand_conf,
     bboxes,
     camera_group,
+    calibrated_serials,
     hands_enabled,
     model_complexity,
     source_video_dir,
+    source_fps,
 ) -> None:
     if not timestamps:
         raise RuntimeError("No mocap frames were processed")
@@ -270,6 +281,16 @@ def _finalize(
     right_hand_conf_np = np.stack(right_hand_conf, axis=1).astype(np.float32)
     bboxes_np = np.stack(bboxes, axis=1).astype(np.float32)
 
+    capture_serials = list(capture_config.camera_serials)
+    reorder_indices = camera_order_indices(capture_serials, calibrated_serials)
+    pose_2d_np = pose_2d_np[reorder_indices]
+    pose_conf_np = pose_conf_np[reorder_indices]
+    left_hand_2d_np = left_hand_2d_np[reorder_indices]
+    left_hand_conf_np = left_hand_conf_np[reorder_indices]
+    right_hand_2d_np = right_hand_2d_np[reorder_indices]
+    right_hand_conf_np = right_hand_conf_np[reorder_indices]
+    bboxes_np = bboxes_np[reorder_indices]
+
     all_landmarks_2d = np.concatenate([pose_2d_np, left_hand_2d_np, right_hand_2d_np], axis=2)
     all_conf = np.concatenate([pose_conf_np, left_hand_conf_np, right_hand_conf_np], axis=2)
     all_landmarks_2d = np.where(all_conf[..., None] <= 0.1, np.nan, all_landmarks_2d)
@@ -278,6 +299,7 @@ def _finalize(
     save_mocap_outputs(
         session_paths=session_paths,
         capture_config=capture_config,
+        camera_serials=calibrated_serials,
         timestamps=timestamps,
         pose_2d_np=pose_2d_np,
         pose_conf_np=pose_conf_np,
@@ -288,7 +310,7 @@ def _finalize(
         bboxes_np=bboxes_np,
         points_3d=points_3d,
         reprojection=reprojection,
-        fps=5.0,
+        fps=source_fps,
         hands_enabled=hands_enabled,
         model_complexity=model_complexity,
     )
@@ -313,3 +335,18 @@ def _read_video_fps(video_dir: Path) -> float:
         finally:
             cap.release()
     return 5.0
+
+
+def _resolve_video_dir_and_output_session(
+    video_dir: Path | None,
+    calib_session: Path,
+) -> tuple[Path, Path | None]:
+    if video_dir is None:
+        return calib_session / "videos", None
+
+    resolved = video_dir.resolve()
+    if resolved.name == "videos" and resolved.parent.name.startswith("mocap_"):
+        return resolved, resolved.parent
+    if resolved.name.startswith("mocap_") and (resolved / "videos").is_dir():
+        return resolved / "videos", resolved
+    return resolved, None

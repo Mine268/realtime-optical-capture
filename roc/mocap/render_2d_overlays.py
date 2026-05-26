@@ -6,6 +6,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from roc.io.video import H264VideoWriter
+
 
 POSE_EDGES = [
     (0, 1),
@@ -106,15 +108,8 @@ def _draw_bbox(frame: np.ndarray, bbox: np.ndarray) -> None:
     cv2.rectangle(frame, (x0, y0), (x1, y1), (255, 255, 0), 2, cv2.LINE_AA)
 
 
-def _open_writer(path: Path, fps: float, width: int, height: int) -> cv2.VideoWriter:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    for fourcc_name in ("mp4v", "avc1"):
-        fourcc = cv2.VideoWriter_fourcc(*fourcc_name)
-        writer = cv2.VideoWriter(str(path), fourcc, max(fps, 1.0), (width, height))
-        if writer.isOpened():
-            return writer
-        writer.release()
-    raise RuntimeError(f"Failed to open overlay writer: {path}")
+def _open_writer(path: Path, fps: float, width: int, height: int) -> H264VideoWriter:
+    return H264VideoWriter(path, width, height, fps, temp_suffix=".overlay_tmp.avi")
 
 
 def render_camera_overlay(
@@ -194,7 +189,7 @@ def render_camera_overlay(
             frame_index += 1
     finally:
         cap.release()
-        writer.release()
+        writer.close()
 
 
 def main() -> None:
@@ -253,6 +248,61 @@ def render_all_overlays(
             frame_limit=frame_limit,
         )
         print(f"Saved 2D overlay video: {output_path}")
+    combined_path = output_dir / "combined_2d_overlay.mp4"
+    render_combined_overlay(
+        overlay_paths=[output_dir / f"{serial}_2d_overlay.mp4" for serial in camera_serials],
+        output_path=combined_path,
+        frame_limit=frame_limit,
+    )
+    print(f"Saved combined 2D overlay video: {combined_path}")
+
+
+def render_combined_overlay(
+    overlay_paths: list[Path],
+    output_path: Path,
+    frame_limit: int = 0,
+    scale: float = 0.5,
+) -> None:
+    if not overlay_paths:
+        raise RuntimeError("No overlay videos provided for combined overlay rendering")
+
+    caps = []
+    try:
+        for path in overlay_paths:
+            cap = cv2.VideoCapture(str(path))
+            if not cap.isOpened():
+                raise RuntimeError(f"Failed to open overlay video: {path}")
+            caps.append(cap)
+
+        fps_values = [cap.get(cv2.CAP_PROP_FPS) for cap in caps]
+        fps = next((float(value) for value in fps_values if value and value > 0), 15.0)
+        first_width = int(caps[0].get(cv2.CAP_PROP_FRAME_WIDTH))
+        first_height = int(caps[0].get(cv2.CAP_PROP_FRAME_HEIGHT))
+        output_width = max(1, int(round(first_width * scale))) * len(caps)
+        output_height = max(1, int(round(first_height * scale)))
+        writer = H264VideoWriter(output_path, output_width, output_height, fps, temp_suffix=".combined_tmp.avi")
+        try:
+            frame_index = 0
+            while True:
+                frames = []
+                for cap in caps:
+                    ret, frame = cap.read()
+                    if not ret:
+                        return
+                    if scale != 1.0:
+                        frame = cv2.resize(frame, (output_width // len(caps), output_height))
+                    frames.append(frame)
+
+                combined = cv2.hconcat(frames)
+                writer.write(combined)
+                frame_index += 1
+                if frame_limit > 0 and frame_index >= frame_limit:
+                    return
+        finally:
+            writer.close()
+    finally:
+        for cap in caps:
+            cap.release()
 
 
 if __name__ == "__main__":
