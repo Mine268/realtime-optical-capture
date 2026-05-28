@@ -127,6 +127,19 @@ python -m roc.cli mocap \
 --postprocess-mode realtime
 ```
 
+选择 MediaPipe delegate：
+
+```bash
+--delegate cpu
+--delegate gpu
+```
+
+使用离线文件作为 MVS-like 相机源测试 `realtime` / `capture`：
+
+```bash
+--offline-source-dir sessions/mocap_YYYYmmdd_HHMMSS/videos
+```
+
 ## 5. 输出说明
 
 `capture` 和 `realtime` 会生成新的：
@@ -223,12 +236,57 @@ python -m roc.cli mocap \
   --calib-session sessions/calib_20260525_163831 \
   --video-dir sessions/mocap_20260526_122017 \
   --model-complexity 1 \
-  --postprocess-mode realtime
+  --postprocess-mode realtime \
+  --delegate cpu
 ```
 
 这会将结果写回 `--video-dir` 对应的 mocap session。
 
-## 8. Realtime Benchmark
+## 8. Offline MVS-like Source
+
+`--offline-source-dir` 会把已经录好的多相机 mp4 或图片目录伪装成 MVS SDK 相机接口，用于测试实时链路，不需要连接工业相机：
+
+```bash
+python -m roc.cli mocap \
+  --mode realtime \
+  --prepare-session sessions/prepare_20260525_162846 \
+  --calib-session sessions/calib_20260525_163831 \
+  --offline-source-dir sessions/mocap_20260526_122017/videos \
+  --model-complexity 1 \
+  --delegate gpu \
+  --frames 100
+```
+
+该路径使用 `OfflineMvsSystem` / `OfflineMvsCamera`，提供和 MVS 相机相近的接口：
+
+```text
+enumerate_devices()
+open_camera()
+apply_manual_capture()
+start_grabbing()
+trigger_software()
+grab_frame()
+snapshot()
+close()
+```
+
+源目录支持：
+
+```text
+videos/
+  <serial>.mp4
+```
+
+或：
+
+```text
+frames/
+  <serial>/
+    frame_000000.bmp
+    frame_000001.bmp
+```
+
+## 9. Realtime Benchmark
 
 使用已录制视频测量不同 MediaPipe pose 模型复杂度在当前机器上的 fake realtime 速度：
 
@@ -238,7 +296,8 @@ python -m roc.mocap.benchmark_realtime \
   --calib-session sessions/calib_20260525_163831 \
   --video-dir sessions/mocap_20260526_122017/videos \
   --frames 100 \
-  --complexities 0 1 2
+  --complexities 0 1 2 \
+  --delegate cpu
 ```
 
 关闭手部测速：
@@ -250,8 +309,32 @@ python -m roc.mocap.benchmark_realtime \
   --video-dir sessions/mocap_20260526_122017/videos \
   --frames 100 \
   --complexities 0 1 2 \
-  --no-hands
+  --no-hands \
+  --delegate cpu
 ```
+
+测试 GPU delegate：
+
+```bash
+python -m roc.mocap.benchmark_realtime \
+  --prepare-session sessions/prepare_20260525_162846 \
+  --calib-session sessions/calib_20260525_163831 \
+  --video-dir sessions/mocap_20260526_122017/videos \
+  --frames 100 \
+  --complexities 1 \
+  --delegate gpu
+```
+
+如果当前 MediaPipe wheel 或图形/EGL 环境不支持 GPU delegate，benchmark 会将该档记录为 `failed` 并写入错误原因。
+
+当前环境下 `--delegate gpu` 的短测结果为失败：
+
+```text
+Unable to initialize EGL
+RET_CHECK failure (mediapipe/gpu/gl_context_egl.cc:84)
+```
+
+这说明当前运行环境没有可用的 MediaPipe GPU/EGL 上下文。需要先解决 EGL/OpenGL 显示环境或运行时配置，再重新测试 GPU delegate。
 
 在 `sessions/mocap_20260526_122017/videos` 上的 100 帧测试结果：
 
@@ -266,7 +349,7 @@ python -m roc.mocap.benchmark_realtime \
 
 在线后处理平均耗时小于 `0.3 ms/frame-set`，主要瓶颈是四路 MediaPipe 串行推理。
 
-## 9. 生成 2D overlay 视频
+## 10. 生成 2D overlay 视频
 
 `capture_estimate` 完成后会自动在 `overlay_videos/` 下生成每个相机视图的 2D 检测叠加视频：
 
@@ -289,7 +372,7 @@ python -m roc.mocap.render_2d_overlays \
   --video-dir sessions/mocap_YYYYmmdd_HHMMSS/videos
 ```
 
-## 10. 生成 3D 可视化 mp4
+## 11. 生成 3D 可视化 mp4
 
 姿态估计完成后，可以把 `mocap_*.npz` 里的 `points_3d` 渲染成 3D 骨架预览视频：
 
@@ -323,7 +406,7 @@ python -m roc.mocap.render_npz \
 
 生成的视频使用 `H.264 / yuv420p` 编码，通常可以直接在 VS Code 中打开预览。
 
-## 11. 生成 3D 重投影诊断视频
+## 12. 生成 3D 重投影诊断视频
 
 如果 3D 骨架看起来异常，可以把 3D 点重投影回四个相机视图，和原始 2D 检测直接对照：
 
@@ -359,7 +442,7 @@ python -m roc.mocap.render_reprojection_overlays \
 
 注意：三角化前会将 2D 点按 `calibration.toml` 的相机顺序重排，`mocap_*.npz` 中的 `camera_serials` 表示保存后数组实际使用的相机顺序。
 
-## 12. 说明
+## 13. 说明
 
 - 手部固定使用 `hand_landmarker.task`
 - 当前推荐优先使用 `capture_estimate` 做调试
@@ -367,7 +450,7 @@ python -m roc.mocap.render_reprojection_overlays \
   - 更强的关键点筛选
   - triangulation camera mask
 
-## 13. 如果出问题
+## 14. 如果出问题
 
 把以下内容反馈回来：
 

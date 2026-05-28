@@ -45,6 +45,7 @@ def main() -> None:
     parser.add_argument("--frames", type=int, default=100)
     parser.add_argument("--complexities", type=int, nargs="+", default=[0, 1, 2], choices=[0, 1, 2])
     parser.add_argument("--no-hands", action="store_true")
+    parser.add_argument("--delegate", default="cpu", choices=["cpu", "gpu"])
     parser.add_argument("--output-dir", type=Path)
     args = parser.parse_args()
 
@@ -55,6 +56,7 @@ def main() -> None:
         frame_limit=args.frames,
         complexities=args.complexities,
         hands_enabled=not args.no_hands,
+        delegate=args.delegate,
         output_dir=args.output_dir,
     )
     print(yaml.safe_dump(report, sort_keys=False, allow_unicode=False))
@@ -67,6 +69,7 @@ def benchmark_realtime_models(
     frame_limit: int,
     complexities: list[int],
     hands_enabled: bool,
+    delegate: str = "cpu",
     output_dir: Path | None = None,
 ) -> dict:
     prepare_session = prepare_session.resolve()
@@ -93,6 +96,7 @@ def benchmark_realtime_models(
         "source_serials": source_serials,
         "calibrated_serials": calibrated_serials,
         "hands_enabled": hands_enabled,
+        "delegate": delegate,
         "frame_limit": frame_limit,
         "postprocess_realtime": {
             "type": "causal_ema_hold",
@@ -113,6 +117,7 @@ def benchmark_realtime_models(
             camera_group=camera_group,
             reorder_indices=reorder_indices,
             frame_limit=frame_limit,
+            delegate=delegate,
         )
         benchmark_report["results"].append(result)
         csv_rows.append(_flatten_result(result))
@@ -140,6 +145,7 @@ def _benchmark_one_complexity(
     camera_group,
     reorder_indices: list[int],
     frame_limit: int,
+    delegate: str,
 ) -> dict:
     pose_model_path = pose_model_path_for_complexity(complexity)
     hand_model_path_value = hand_model_path() if hands_enabled else None
@@ -147,12 +153,14 @@ def _benchmark_one_complexity(
         return {
             "model_complexity": complexity,
             "status": "skipped",
+            "delegate": delegate,
             "reason": f"Pose model not found: {pose_model_path}",
         }
     if hands_enabled and (hand_model_path_value is None or not hand_model_path_value.is_file()):
         return {
             "model_complexity": complexity,
             "status": "skipped",
+            "delegate": delegate,
             "reason": f"Hand model not found: {hand_model_path_value}",
         }
 
@@ -176,17 +184,27 @@ def _benchmark_one_complexity(
             caps.append((serial, cap))
 
         with ExitStack() as stack:
-            trackers = {
-                serial: stack.enter_context(
-                    MediapipeTracker(
-                        pose_model_path=pose_model_path,
-                        hand_model_path=hand_model_path_value,
-                        model_complexity=complexity,
-                        hands_enabled=hands_enabled,
+            try:
+                trackers = {
+                    serial: stack.enter_context(
+                        MediapipeTracker(
+                            pose_model_path=pose_model_path,
+                            hand_model_path=hand_model_path_value,
+                            model_complexity=complexity,
+                            hands_enabled=hands_enabled,
+                            delegate=delegate,
+                        )
                     )
-                )
-                for serial in source_serials
-            }
+                    for serial in source_serials
+                }
+            except Exception as exc:
+                return {
+                    "model_complexity": complexity,
+                    "status": "failed",
+                    "hands_enabled": hands_enabled,
+                    "delegate": delegate,
+                    "reason": f"{type(exc).__name__}: {exc}",
+                }
             processed = 0
             while frame_limit <= 0 or processed < frame_limit:
                 frame_start = time.perf_counter()
@@ -196,7 +214,7 @@ def _benchmark_one_complexity(
                 for serial, cap in caps:
                     ret, frame = cap.read()
                     if not ret:
-                        return _result(complexity, hands_enabled, processed, stats, online_filter)
+                        return _result(complexity, hands_enabled, processed, stats, online_filter, delegate)
                     frames.append((serial, frame))
                 stats["read"].add(time.perf_counter() - read_start)
 
@@ -247,7 +265,7 @@ def _benchmark_one_complexity(
         for _, cap in caps:
             cap.release()
 
-    return _result(complexity, hands_enabled, frame_limit, stats, online_filter)
+    return _result(complexity, hands_enabled, frame_limit, stats, online_filter, delegate)
 
 
 def _result(
@@ -256,12 +274,14 @@ def _result(
     frames_processed: int,
     stats: dict[str, RunningStats],
     online_filter: RealtimePostprocessor,
+    delegate: str,
 ) -> dict:
     frame_set_mean_s = float(np.mean(stats["frame_set_total"].values)) if stats["frame_set_total"].values else 0.0
     result = {
         "model_complexity": complexity,
         "status": "ok",
         "hands_enabled": hands_enabled,
+        "delegate": delegate,
         "frames_processed": frames_processed,
         "estimated_frame_set_fps": 1.0 / frame_set_mean_s if frame_set_mean_s > 0 else 0.0,
         "estimated_per_camera_fps": (
@@ -278,12 +298,14 @@ def _flatten_result(result: dict) -> dict:
         return {
             "model_complexity": result.get("model_complexity"),
             "status": result.get("status"),
+            "delegate": result.get("delegate", ""),
             "reason": result.get("reason", ""),
         }
     flattened = {
         "model_complexity": result["model_complexity"],
         "status": result["status"],
         "hands_enabled": result["hands_enabled"],
+        "delegate": result["delegate"],
         "frames_processed": result["frames_processed"],
         "estimated_frame_set_fps": result["estimated_frame_set_fps"],
         "estimated_per_camera_fps": result["estimated_per_camera_fps"],

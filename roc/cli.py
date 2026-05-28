@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# PYTHON_ARGCOMPLETE_OK
+
 import argparse
 from pathlib import Path
 
@@ -164,12 +166,32 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["offline", "realtime"],
         help="Postprocess mode for capture_estimate: offline uses zero-phase batch filtering, realtime uses causal online filtering",
     )
+    mocap_parser.add_argument(
+        "--delegate",
+        default="cpu",
+        choices=["cpu", "gpu"],
+        help="MediaPipe inference delegate",
+    )
+    mocap_parser.add_argument(
+        "--offline-source-dir",
+        type=Path,
+        help="Use recorded files as an MVS-like camera source for realtime/capture testing",
+    )
 
     return parser
 
 
+def _enable_argcomplete(parser: argparse.ArgumentParser) -> None:
+    try:
+        import argcomplete
+    except ImportError:
+        return
+    argcomplete.autocomplete(parser)
+
+
 def main() -> None:
     parser = build_parser()
+    _enable_argcomplete(parser)
     args = parser.parse_args()
 
     if args.command == "prepare":
@@ -215,6 +237,8 @@ def main() -> None:
                 hands_enabled=not args.no_hands,
                 model_complexity=args.model_complexity,
                 show_preview=args.show_preview,
+                delegate=args.delegate,
+                offline_source_dir=args.offline_source_dir,
             )
             return
 
@@ -231,6 +255,7 @@ def main() -> None:
                 model_complexity=args.model_complexity,
                 show_preview=args.show_preview,
                 postprocess_mode=args.postprocess_mode,
+                delegate=args.delegate,
             )
             return
 
@@ -244,6 +269,7 @@ def main() -> None:
                 fps=args.fps,
                 max_frames=args.frames,
                 show_preview=args.show_preview,
+                offline_source_dir=args.offline_source_dir,
             )
             return
 

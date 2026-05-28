@@ -93,10 +93,12 @@ class MediapipeTracker:
         hand_model_path: Path | None,
         model_complexity: int,
         hands_enabled: bool,
+        delegate: str = "cpu",
     ) -> None:
+        base_options = _base_options(pose_model_path, delegate)
         self._pose = vision.PoseLandmarker.create_from_options(
             vision.PoseLandmarkerOptions(
-                base_options=BaseOptions(model_asset_path=str(pose_model_path)),
+                base_options=base_options,
                 running_mode=VisionTaskRunningMode.VIDEO,
                 num_poses=1,
                 min_pose_detection_confidence=0.5,
@@ -110,7 +112,7 @@ class MediapipeTracker:
         if self._hands_enabled:
             self._hands = vision.HandLandmarker.create_from_options(
                 vision.HandLandmarkerOptions(
-                    base_options=BaseOptions(model_asset_path=str(hand_model_path)),
+                    base_options=_base_options(hand_model_path, delegate),
                     running_mode=VisionTaskRunningMode.VIDEO,
                     num_hands=2,
                     min_hand_detection_confidence=0.5,
@@ -173,3 +175,13 @@ class MediapipeTracker:
                 conf_target[index] = score
         return HandTrackResult(left_xy, left_conf, right_xy, right_conf)
 
+
+def _base_options(model_path: Path, delegate: str) -> BaseOptions:
+    normalized = delegate.lower()
+    if normalized == "cpu":
+        selected_delegate = BaseOptions.Delegate.CPU
+    elif normalized == "gpu":
+        selected_delegate = BaseOptions.Delegate.GPU
+    else:
+        raise ValueError(f"Unsupported MediaPipe delegate: {delegate}")
+    return BaseOptions(model_asset_path=str(model_path), delegate=selected_delegate)

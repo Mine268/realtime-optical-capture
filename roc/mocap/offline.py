@@ -30,6 +30,7 @@ def run_mocap_offline(
     model_complexity: int,
     show_preview: bool,
     postprocess_mode: str = "offline",
+    delegate: str = "cpu",
 ) -> None:
     prepare_session = prepare_session.resolve()
     calib_session = calib_session.resolve()
@@ -91,6 +92,7 @@ def run_mocap_offline(
             print(f"Calibration session: {calib_session}")
             print(f"Output session: {session_paths.session_dir}")
             print(f"Postprocess mode: {postprocess_mode}")
+            print(f"MediaPipe delegate: {delegate}")
             camera_group = load_camera_group_from_toml(calibration_toml_path)
             calibrated_serials = camera_group_names(camera_group)
 
@@ -137,6 +139,7 @@ def run_mocap_offline(
                                 hand_model_path=hand_model_path_value,
                                 model_complexity=model_complexity,
                                 hands_enabled=hands_enabled,
+                                delegate=delegate,
                             )
                         )
                         for serial in ordered_serials

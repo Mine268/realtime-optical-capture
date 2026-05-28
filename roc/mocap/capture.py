@@ -11,7 +11,7 @@ from roc.config.models import MocapConfig
 from roc.config.yaml_io import load_capture_config, save_capture_config, save_mocap_config
 from roc.io.sessions import create_mocap_session
 from roc.mocap.logging_utils import tee_to_log
-from roc.mvs import MvsSystem
+from roc.mvs import MvsSystem, OfflineMvsSystem
 from roc.mocap.sync_capture import SyncCaptureWorker, transcode_raw_frames_to_videos
 
 
@@ -22,6 +22,7 @@ def run_mocap_capture(
     fps: float,
     max_frames: int,
     show_preview: bool,
+    offline_source_dir: Path | None = None,
 ) -> None:
     prepare_session = prepare_session.resolve()
     calib_session = calib_session.resolve()
@@ -55,7 +56,10 @@ def run_mocap_capture(
     with tee_to_log(session_paths.logs_dir / "mocap.log"):
         try:
             serial_to_cfg = {camera.serial: camera for camera in capture_config.cameras if camera.enabled}
-            with MvsSystem() as mvs:
+            if offline_source_dir is not None:
+                print(f"Offline source dir: {offline_source_dir.resolve()}")
+            system = OfflineMvsSystem(offline_source_dir, serials=capture_config.camera_serials) if offline_source_dir else MvsSystem()
+            with system as mvs:
                 devices = mvs.enumerate_devices()
                 serial_to_device = {device.serial: device for device in devices}
                 ordered_serials = [serial for serial in capture_config.camera_serials if serial in serial_to_cfg]

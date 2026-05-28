@@ -14,7 +14,7 @@ from roc.config.yaml_io import load_capture_config, save_capture_config, save_mo
 from roc.io.sessions import create_mocap_session
 from roc.mocap.common import build_temp_video_writer, finalize_videos_with_actual_fps, save_mocap_outputs
 from roc.mocap.logging_utils import tee_to_log
-from roc.mvs import MvsSystem
+from roc.mvs import MvsSystem, OfflineMvsSystem
 from roc.tracking.mediapipe_tracker import MediapipeTracker
 from roc.tracking.model_paths import hand_model_path, pose_model_path_for_complexity
 from roc.triangulation.cameras import camera_group_names, camera_order_indices, load_camera_group_from_toml
@@ -30,6 +30,8 @@ def run_mocap_realtime(
     hands_enabled: bool,
     model_complexity: int,
     show_preview: bool,
+    delegate: str = "cpu",
+    offline_source_dir: Path | None = None,
 ) -> None:
     prepare_session = prepare_session.resolve()
     calib_session = calib_session.resolve()
@@ -67,6 +69,9 @@ def run_mocap_realtime(
         try:
             print(f"Prepare session: {prepare_session}")
             print(f"Calibration session: {calib_session}")
+            print(f"MediaPipe delegate: {delegate}")
+            if offline_source_dir is not None:
+                print(f"Offline source dir: {offline_source_dir.resolve()}")
             camera_group = load_camera_group_from_toml(calibration_toml_path)
             calibrated_serials = camera_group_names(camera_group)
 
@@ -87,7 +92,8 @@ def run_mocap_realtime(
             right_hand_conf = []
             bboxes = []
 
-            with MvsSystem() as mvs, ExitStack() as stack:
+            system = OfflineMvsSystem(offline_source_dir, serials=capture_config.camera_serials) if offline_source_dir else MvsSystem()
+            with system as mvs, ExitStack() as stack:
                 devices = mvs.enumerate_devices()
                 serial_to_device = {device.serial: device for device in devices}
                 ordered_serials = [serial for serial in capture_config.camera_serials if serial in serial_to_cfg]
@@ -102,6 +108,7 @@ def run_mocap_realtime(
                             hand_model_path=hand_model_path_value,
                             model_complexity=model_complexity,
                             hands_enabled=hands_enabled,
+                            delegate=delegate,
                         )
                     )
                     for serial in ordered_serials
