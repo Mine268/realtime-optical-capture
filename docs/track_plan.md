@@ -32,6 +32,20 @@ Tracking mode should:
 - Apply temporal, velocity, and acceleration smoothing on rotations.
 - Run periodic medium/full fitting when error or motion spikes.
 
+## Current Status
+
+The first body-only `track` implementation is in place. It uses `RealtimeSmplxTracker` with warm-started Adam optimization, weighted body joint fitting, explicit knee and elbow angle losses, hip/shoulder horizontal-axis alignment, light elbow/wrist target smoothing, and limb-length gating for obvious arm outliers. It saves the same `smplx_fit_sequence.npz` schema as fit mode and recomputes `smplx_joints` after save-time smoothing.
+
+Latest `sessions/mocap_test` 200-frame validation:
+
+- Track mapped 3D error mean/p90/max: `0.0616 / 0.0730 / 0.1898 m`.
+- Fit mapped 3D error mean/p90/max: `0.0517 / 0.0658 / 0.1926 m`.
+- Track-vs-fit body joint mean/p90/max: `0.0722 / 0.0913 / 0.1544 m`.
+- Frame 96 knee angle target/track/fit: left `40.4/45.0/39.8 deg`, right `39.8/46.1/37.4 deg`.
+- Frame 96 elbow angle target/track/fit: left `116.8/114.4/119.3 deg`, right `112.1/112.3/112.8 deg`.
+- Frames 60-115 hip-yaw error mean/p90/max: `9.7 / 21.6 / 28.5 deg`.
+- Retarget-only throughput is about `5.8 FPS` on the RTX 2080 Ti test machine, so the 10 FPS target is not met yet.
+
 ## Implementation Phases
 
 ### Phase 1: Tracking Skeleton

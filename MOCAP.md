@@ -148,6 +148,11 @@ logs/mocap.log
 
 Retarget 需要 SMPL-X 依赖和模型文件。默认读取 `models/smplx`；也可以用 `--retarget-model-dir models` 指向包含 `smplx/` 子目录的父目录。只有启用 `--retarget-use-vposer` 时才需要 `--retarget-vposer-dir`。
 
+`--retarget-mode` 控制 SMPL-X 路径：
+
+- `fit`：默认高质量 fitting，逐帧调用参考 fitter，支持 lower-body refine 和可选 hand fitting，适合离线质量基线。
+- `track`：body-only realtime tracker，冻结 betas 和手部 pose，用上一帧 warm start 做轻量 Adam 优化，适合低延迟驱动。当前实现会对膝盖、肘部和髋/肩横轴朝向加入显式约束，并对异常肘/腕三角化做 limb-length gate，避免追踪明显错误的单帧手臂点。
+
 ```bash
 roc mocap \
   --mode capture_estimate \
@@ -156,6 +161,7 @@ roc mocap \
   --mocap-session sessions/mocap_test \
   --frames 200 \
   --retarget \
+  --retarget-mode fit \
   --retarget-model-dir models/smplx
 ```
 
@@ -184,6 +190,8 @@ reprojection_videos/combined_smplx_reprojection_overlay.mp4
 
 ```bash
 --inference-device gpu          # MediaPipe 使用 GPU delegate，retarget 使用 CUDA
+--retarget-mode fit             # 高质量 fitting，默认
+--retarget-mode track           # body-only realtime tracking
 --retarget-max-frames 200       # 限制 retarget 帧数，-1 表示全部
 --retarget-frame-step 2         # 每隔 N 帧 retarget 一帧
 --retarget-input-scale 0.001    # ROC 3D 点默认从毫米转成米
@@ -200,6 +208,21 @@ reprojection_videos/combined_smplx_reprojection_overlay.mp4
 --retarget-betas-steps 80       # 共享体型优化步数
 --retarget-hands                # 同时优化 SMPL-X 手部 pose
 --retarget-save-debug-assets    # 额外保存 obj/png 调试文件
+```
+
+`track` 模式当前使用固定内部参数，优先服务 realtime body-only 驱动；`--retarget-pose-steps`、`--retarget-lower-steps`、`--retarget-hands` 等 fit 参数不会改变 track 的核心优化预算。需要对比质量时，同一段数据建议分别跑 `--retarget-mode fit` 和 `--retarget-mode track`，并比较 `smplx_retarget/smplx_fit_sequence.npz`、SMPL-X reprojection overlay、膝/肘夹角和 wrist acceleration。
+
+当前 `sessions/mocap_test` 200 帧验证结果（RTX 2080 Ti，fake MVS，body-only track）：
+
+```text
+track mapped 3D error mean/p90/max: 0.0616 / 0.0730 / 0.1898 m
+fit   mapped 3D error mean/p90/max: 0.0517 / 0.0658 / 0.1926 m
+track-vs-fit body joint mean/p90/max: 0.0722 / 0.0913 / 0.1544 m
+frame 96 knee angle target/track/fit: L 40.4/45.0/39.8 deg, R 39.8/46.1/37.4 deg
+frame 96 elbow angle target/track/fit: L 116.8/114.4/119.3 deg, R 112.1/112.3/112.8 deg
+track wrist current-frame error mean/p90: L 0.0906/0.1400 m, R 0.0806/0.1297 m
+track hip-yaw error on frames 60-115 mean/p90/max: 9.7 / 21.6 / 28.5 deg
+track throughput: about 5.8 FPS for retarget-only on the test machine
 ```
 
 `realtime` 默认也会使用高质量 fitting 参数，因此启用 `--retarget` 后会明显变慢。排查耗时时使用统一的 mocap profile：

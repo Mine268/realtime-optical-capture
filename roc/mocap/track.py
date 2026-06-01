@@ -44,15 +44,105 @@ class RealtimeSmplxTracker:
         self.shared_betas = self.T.zeros((1, 10), dtype=self.T.float32, device=self.device)
 
         # Pre-build index tensors
-        body_smplx_map = getattr(self.fitter, "BODY_SMPLX_MAP", {})
+        body_smplx_map = dict(getattr(self.fitter, "BODY_SMPLX_MAP", {}))
+        body_smplx_map.setdefault("left_shoulder", "left_shoulder")
+        body_smplx_map.setdefault("right_shoulder", "right_shoulder")
         body_idx = {name: i for i, name in enumerate(BODY_NAMES)}
         src_l, tgt_l = [], []
+        target_names = []
         for bn, sn in body_smplx_map.items():
             if bn in body_idx and sn in self.joint_name_to_idx:
                 src_l.append(self.joint_name_to_idx[sn])
                 tgt_l.append(body_idx[bn])
+                target_names.append(bn)
         self._src = self.T.tensor(src_l, device=self.device, dtype=self.T.long)
         self._tgt_idx = self.T.tensor(tgt_l, device=self.device, dtype=self.T.long)
+        self._target_names = target_names
+        self._target_weights = self.T.tensor(
+            [_target_weight(name) for name in target_names],
+            device=self.device,
+            dtype=self.T.float32,
+        )
+        self._target_smooth_alpha = self.T.tensor(
+            [_target_smooth_alpha(name) for name in target_names],
+            device=self.device,
+            dtype=self.T.float32,
+        )
+        self._pose_prior_weights = self.T.tensor(
+            _body_pose_prior_weights(),
+            device=self.device,
+            dtype=self.T.float32,
+        ).view(1, 63)
+        self._temporal_weights = self.T.tensor(
+            _body_pose_temporal_weights(),
+            device=self.device,
+            dtype=self.T.float32,
+        ).view(1, 63)
+        self._smplx_knee_triplets = self.T.tensor(
+            [
+                [
+                    self.joint_name_to_idx["left_hip"],
+                    self.joint_name_to_idx["left_knee"],
+                    self.joint_name_to_idx["left_ankle"],
+                ],
+                [
+                    self.joint_name_to_idx["right_hip"],
+                    self.joint_name_to_idx["right_knee"],
+                    self.joint_name_to_idx["right_ankle"],
+                ],
+            ],
+            device=self.device,
+            dtype=self.T.long,
+        )
+        self._target_knee_triplets = self.T.tensor(
+            [
+                [body_idx["left_hip"], body_idx["left_knee"], body_idx["left_ankle"]],
+                [body_idx["right_hip"], body_idx["right_knee"], body_idx["right_ankle"]],
+            ],
+            device=self.device,
+            dtype=self.T.long,
+        )
+        self._smplx_elbow_triplets = self.T.tensor(
+            [
+                [
+                    self.joint_name_to_idx["left_shoulder"],
+                    self.joint_name_to_idx["left_elbow"],
+                    self.joint_name_to_idx["left_wrist"],
+                ],
+                [
+                    self.joint_name_to_idx["right_shoulder"],
+                    self.joint_name_to_idx["right_elbow"],
+                    self.joint_name_to_idx["right_wrist"],
+                ],
+            ],
+            device=self.device,
+            dtype=self.T.long,
+        )
+        self._target_elbow_triplets = self.T.tensor(
+            [
+                [body_idx["left_shoulder"], body_idx["left_elbow"], body_idx["left_wrist"]],
+                [body_idx["right_shoulder"], body_idx["right_elbow"], body_idx["right_wrist"]],
+            ],
+            device=self.device,
+            dtype=self.T.long,
+        )
+        self._smplx_axis_pairs = self.T.tensor(
+            [
+                [self.joint_name_to_idx["left_hip"], self.joint_name_to_idx["right_hip"]],
+                [self.joint_name_to_idx["left_shoulder"], self.joint_name_to_idx["right_shoulder"]],
+            ],
+            device=self.device,
+            dtype=self.T.long,
+        )
+        self._target_axis_pairs = self.T.tensor(
+            [
+                [body_idx["left_hip"], body_idx["right_hip"]],
+                [body_idx["left_shoulder"], body_idx["right_shoulder"]],
+            ],
+            device=self.device,
+            dtype=self.T.long,
+        )
+        self._axis_weights = self.T.tensor([2.0, 1.0], device=self.device, dtype=self.T.float32)
 
         # Warm-start state on GPU
         self._prev_bp = self.T.zeros(1, 63, device=self.device)
@@ -63,6 +153,7 @@ class RealtimeSmplxTracker:
         self._prev_prev_tr = self.T.zeros(1, 3, device=self.device)
         self._has_prev = False
         self._has_prev_prev = False
+        self._prev_target_23: object | None = None
 
         self.aggregate: list[dict[str, np.ndarray]] = []
 
@@ -75,6 +166,12 @@ class RealtimeSmplxTracker:
         # Build target
         target_full = T.from_numpy(scaled).to(self.device)
         target_23 = target_full[self._tgt_idx]
+        if self._prev_target_23 is not None:
+            prev_target_23 = self._prev_target_23
+            alpha = self._target_smooth_alpha
+            smooth_mask = (alpha > 0.0) & T.isfinite(prev_target_23).all(dim=1) & T.isfinite(target_23).all(dim=1)
+            smoothed = alpha[:, None] * prev_target_23 + (1.0 - alpha[:, None]) * target_23
+            target_23 = T.where(smooth_mask[:, None], smoothed, target_23)
         valid_23 = T.isfinite(target_23).all(dim=1)
         n_valid = int(valid_23.sum())
         if n_valid < 3:
@@ -100,8 +197,18 @@ class RealtimeSmplxTracker:
         _model = self.model
         _betas = self.shared_betas
         tw = self.config.track_temporal_weight
+        _target_weights = self._target_weights
+        _pose_prior_weights = self._pose_prior_weights
+        _temporal_weights = self._temporal_weights
+        _smplx_knee_triplets = self._smplx_knee_triplets
+        _target_knee_triplets = self._target_knee_triplets
+        _smplx_elbow_triplets = self._smplx_elbow_triplets
+        _target_elbow_triplets = self._target_elbow_triplets
+        _smplx_axis_pairs = self._smplx_axis_pairs
+        _target_axis_pairs = self._target_axis_pairs
+        _axis_weights = self._axis_weights
 
-        # Adam with pose prior to prevent unnatural joint angles
+        # Adam with joint-specific priors. Knees stay loose so squats can bend.
         n_steps = 55 if not has_prev else 18
         adapter_elapsed = time.perf_counter() - start
 
@@ -111,11 +218,8 @@ class RealtimeSmplxTracker:
             {"params": [tr], "lr": 0.03},
         ])
 
-        wp = 0.10  # pose prior: L2 on body_pose to stay near rest pose
-        wk = 0.005  # light knee penalty to avoid hyperextension
-        ws = 0.03   # spine penalty to maintain torso length
-
-        T.cuda.synchronize()
+        if self.device.type == "cuda":
+            T.cuda.synchronize()
         opt_start = time.perf_counter()
         for _ in range(n_steps):
             optimizer.zero_grad()
@@ -125,22 +229,37 @@ class RealtimeSmplxTracker:
             )
             pred_pts = out.joints[0, _src]
             diffs = pred_pts[_valid] - _tgt[_valid]
-            loss = (diffs * diffs).sum() / n_valid
+            valid_weights = _target_weights[_valid]
+            loss = (valid_weights[:, None] * diffs.square()).sum() / (3.0 * valid_weights.sum().clamp_min(1e-6))
 
-            # Pose prior: keeps all joints near rest pose
-            loss = loss + wp * T.mean(bp ** 2)
-
-            # Knee: light penalty (joints 3=l_knee@9:12, 4=r_knee@12:15)
-            loss = loss + wk * (T.mean(bp[:, 9:12] ** 2) + T.mean(bp[:, 12:15] ** 2))
-
-            # Spine: maintain torso height (spine1@6:9, spine2@15:18, spine3@24:27)
-            loss = loss + ws * (
-                T.mean(bp[:, 6:9] ** 2) + T.mean(bp[:, 15:18] ** 2) + T.mean(bp[:, 24:27] ** 2)
+            loss = loss + T.mean(_pose_prior_weights * bp.square())
+            loss = loss + 0.08 * _knee_angle_loss(
+                T,
+                out.joints[0],
+                target_full,
+                _smplx_knee_triplets,
+                _target_knee_triplets,
+            )
+            loss = loss + 0.04 * _knee_angle_loss(
+                T,
+                out.joints[0],
+                target_full,
+                _smplx_elbow_triplets,
+                _target_elbow_triplets,
+                max_target_segment_m=0.40,
+            )
+            loss = loss + 0.10 * _axis_alignment_loss(
+                T,
+                out.joints[0],
+                target_full,
+                _smplx_axis_pairs,
+                _target_axis_pairs,
+                _axis_weights,
             )
 
             if has_prev:
                 loss = loss + tw * (
-                    T.mean((bp - p_bp) ** 2)
+                    T.mean(_temporal_weights * (bp - p_bp).square())
                     + 0.5 * T.mean((go - p_go) ** 2)
                     + 0.3 * T.mean((tr - p_tr) ** 2)
                 )
@@ -151,20 +270,21 @@ class RealtimeSmplxTracker:
                     cv_go = go - p_go; pv_go = p_go - pp_go
                     cv_tr = tr - p_tr; pv_tr = p_tr - pp_tr
                     loss = loss + vw * (
-                        T.mean((cv_bp - pv_bp) ** 2)
+                        T.mean(_temporal_weights * (cv_bp - pv_bp).square())
                         + 0.3 * T.mean((cv_go - pv_go) ** 2)
                         + 0.2 * T.mean((cv_tr - pv_tr) ** 2)
                     )
                 aw = self.config.track_acceleration_weight
                 if aw > 0:
                     loss = loss + aw * (
-                        T.mean((bp - 2 * p_bp + pp_bp) ** 2)
+                        T.mean(_temporal_weights * (bp - 2 * p_bp + pp_bp).square())
                         + 0.3 * T.mean((go - 2 * p_go + pp_go) ** 2)
                         + 0.2 * T.mean((tr - 2 * p_tr + pp_tr) ** 2)
                     )
             loss.backward()
             optimizer.step()
-        T.cuda.synchronize()
+        if self.device.type == "cuda":
+            T.cuda.synchronize()
         opt_elapsed = time.perf_counter() - opt_start
 
         with T.no_grad():
@@ -212,6 +332,7 @@ class RealtimeSmplxTracker:
         self._prev_bp = bp.detach().clone()
         self._prev_go = go.detach().clone()
         self._prev_tr = tr.detach().clone()
+        self._prev_target_23 = target_23.detach().clone()
         self._has_prev = True
         self._has_prev_prev = has_prev
 
@@ -237,10 +358,29 @@ class RealtimeSmplxTracker:
         if not self.aggregate:
             raise RuntimeError("No track frames were produced")
         _apply_so3_smooth(self.aggregate, sigma=0.30)
+        self._refresh_smoothed_joints()
         sequence_path = self.output_dir / "smplx_fit_sequence.npz"
         _save_sequence_npz(sequence_path, self.aggregate, self.config, source_npz=source_npz)
         _write_track_report(self.output_dir, source_npz, sequence_path, self.aggregate, self.config)
         return sequence_path
+
+    def _refresh_smoothed_joints(self) -> None:
+        T = self.T
+        zh = T.zeros(1, 12, device=self.device)
+        with T.no_grad():
+            for item in self.aggregate:
+                bp = T.tensor(item["body_pose"], dtype=T.float32, device=self.device)
+                go = T.tensor(item["global_orient"], dtype=T.float32, device=self.device)
+                tr = T.tensor(item["transl"], dtype=T.float32, device=self.device)
+                out = self.model(
+                    betas=self.shared_betas,
+                    body_pose=bp,
+                    global_orient=go,
+                    transl=tr,
+                    left_hand_pose=zh,
+                    right_hand_pose=zh,
+                )
+                item["smplx_joints"] = out.joints.cpu().numpy().copy()
 
 
 def _apply_so3_smooth(aggregate: list[dict[str, np.ndarray]], sigma: float) -> None:
@@ -257,6 +397,133 @@ def _apply_so3_smooth(aggregate: list[dict[str, np.ndarray]], sigma: float) -> N
         item["body_pose"] = sbp[i].reshape(1, 63).astype(np.float32)
         item["global_orient"] = sgo[i].reshape(1, 3).astype(np.float32)
         item["transl"] = st[i].reshape(1, 3).astype(np.float32)
+
+
+def _knee_angle_loss(
+    T: object,
+    pred_joints: object,
+    target_points: object,
+    pred_triplets: object,
+    target_triplets: object,
+    max_target_segment_m: float | None = None,
+) -> object:
+    target_sel = target_points[target_triplets]
+    valid = T.isfinite(target_sel).all(dim=(1, 2))
+    if max_target_segment_m is not None:
+        upper = T.linalg.norm(target_sel[:, 0] - target_sel[:, 1], dim=1)
+        lower = T.linalg.norm(target_sel[:, 2] - target_sel[:, 1], dim=1)
+        valid = valid & (upper <= max_target_segment_m) & (lower <= max_target_segment_m)
+    if not bool(valid.any()):
+        return pred_joints.sum() * 0.0
+
+    pred_cos = _triplet_cosine(T, pred_joints, pred_triplets)
+    target_cos = _triplet_cosine(T, target_points, target_triplets)
+    valid = valid & T.isfinite(pred_cos) & T.isfinite(target_cos)
+    if not bool(valid.any()):
+        return pred_joints.sum() * 0.0
+    return (pred_cos[valid] - target_cos[valid]).square().mean()
+
+
+def _triplet_cosine(T: object, points: object, triplets: object) -> object:
+    p = points[triplets]
+    v1 = p[:, 0] - p[:, 1]
+    v2 = p[:, 2] - p[:, 1]
+    denom = T.linalg.norm(v1, dim=1) * T.linalg.norm(v2, dim=1)
+    return (v1 * v2).sum(dim=1) / denom.clamp_min(1e-6)
+
+
+def _axis_alignment_loss(
+    T: object,
+    pred_joints: object,
+    target_points: object,
+    pred_pairs: object,
+    target_pairs: object,
+    weights: object,
+) -> object:
+    pred_sel = pred_joints[pred_pairs]
+    target_sel = target_points[target_pairs]
+    valid = T.isfinite(target_sel).all(dim=(1, 2))
+    pred_axis = _horizontal_axis(T, pred_sel[:, 0] - pred_sel[:, 1])
+    target_axis = _horizontal_axis(T, target_sel[:, 0] - target_sel[:, 1])
+    valid = valid & T.isfinite(pred_axis).all(dim=1) & T.isfinite(target_axis).all(dim=1)
+    if not bool(valid.any()):
+        return pred_joints.sum() * 0.0
+    diffs = pred_axis[valid] - target_axis[valid]
+    valid_weights = weights[valid]
+    return (valid_weights[:, None] * diffs.square()).sum() / (2.0 * valid_weights.sum().clamp_min(1e-6))
+
+
+def _horizontal_axis(T: object, axis: object) -> object:
+    xy = axis[:, :2]
+    norm = T.linalg.norm(xy, dim=1, keepdim=True).clamp_min(1e-6)
+    return xy / norm
+
+
+def _target_weight(name: str) -> float:
+    if name in {"left_knee", "right_knee", "left_ankle", "right_ankle"}:
+        return 2.3
+    if name in {"left_heel", "right_heel", "left_foot_index", "right_foot_index"}:
+        return 1.8
+    if name in {"left_hip", "right_hip"}:
+        return 1.8
+    if name == "hips_center":
+        return 0.35
+    if name in {"left_shoulder", "right_shoulder"}:
+        return 1.7
+    if name in {"left_elbow", "right_elbow"}:
+        return 1.05
+    if name in {"left_wrist", "right_wrist"}:
+        return 0.55
+    if name in {"trunk_center", "neck_center", "head_center"}:
+        return 0.25
+    if name in {"nose", "left_eye", "right_eye", "left_ear", "right_ear", "head_center"}:
+        return 0.35
+    return 1.0
+
+
+def _target_smooth_alpha(name: str) -> float:
+    if name in {"left_wrist", "right_wrist"}:
+        return 0.20
+    if name in {"left_elbow", "right_elbow"}:
+        return 0.35
+    return 0.0
+
+
+def _body_pose_prior_weights() -> np.ndarray:
+    weights = np.full(63, 0.018, dtype=np.float32)
+    _set_joint_weight(weights, 2, 0.045)   # spine1
+    _set_joint_weight(weights, 5, 0.045)   # spine2
+    _set_joint_weight(weights, 8, 0.045)   # spine3
+    _set_joint_weight(weights, 11, 0.035)  # neck
+    _set_joint_weight(weights, 12, 0.035)  # left_collar
+    _set_joint_weight(weights, 13, 0.035)  # right_collar
+    _set_joint_weight(weights, 3, 0.010)   # left_knee
+    _set_joint_weight(weights, 4, 0.010)   # right_knee
+    _set_joint_weight(weights, 6, 0.010)   # left_ankle
+    _set_joint_weight(weights, 7, 0.010)   # right_ankle
+    _set_joint_weight(weights, 9, 0.012)   # left_foot
+    _set_joint_weight(weights, 10, 0.012)  # right_foot
+    _set_joint_weight(weights, 19, 0.120)  # left_wrist
+    _set_joint_weight(weights, 20, 0.120)  # right_wrist
+    return weights
+
+
+def _body_pose_temporal_weights() -> np.ndarray:
+    weights = np.ones(63, dtype=np.float32)
+    for joint in (12, 13):
+        _set_joint_weight(weights, joint, 2.4)
+    for joint in (15, 16, 17, 18):
+        _set_joint_weight(weights, joint, 1.8)
+    for joint in (19, 20):
+        _set_joint_weight(weights, joint, 1.2)
+    for joint in (3, 4, 6, 7, 9, 10):
+        _set_joint_weight(weights, joint, 0.65)
+    return weights
+
+
+def _set_joint_weight(weights: np.ndarray, joint_index: int, value: float) -> None:
+    start = joint_index * 3
+    weights[start : start + 3] = value
 
 
 def _apply_track_overrides(base_args: argparse.Namespace, config: RetargetConfig) -> argparse.Namespace:
