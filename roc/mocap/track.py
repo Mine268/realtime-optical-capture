@@ -11,82 +11,16 @@ from roc.mocap.retarget import (
     BODY_NAMES,
     HAND_NAMES,
     RetargetConfig,
-    _body_root_features,
-    _build_reference_args,
     _ensure_retarget_dependencies,
-    _format_timing_line,
     _load_reference_fitter,
     _resolve_smplx_model_dir,
     _save_sequence_npz,
-    _sequence_from_points,
-    _vector_angle_deg,
     _write_report,
 )
 
 
-def _geometric_root(points_3d_scaled, rest_joints, body_idx, joint_name_to_idx):
-    """Estimate global_orient and transl from hip/shoulder keypoints.
-
-    Root is in world space — geometric estimation is reliable.
-    Returns flat arrays: global_orient (3,), transl (3,).
-    """
-    def _pt(name):
-        idx = body_idx.get(name)
-        if idx is None:
-            return None
-        p = points_3d_scaled[idx]
-        return p.astype(np.float64) if np.all(np.isfinite(p)) else None
-
-    def _jidx(name):
-        return joint_name_to_idx[name]
-
-    def _rot_between(v_from, v_to):
-        v_from = v_from.astype(np.float64)
-        v_to = v_to.astype(np.float64)
-        fn = np.linalg.norm(v_from)
-        tn = np.linalg.norm(v_to)
-        if fn < 1e-10 or tn < 1e-10:
-            return np.zeros(3, dtype=np.float32)
-        v_from = v_from / fn
-        v_to = v_to / tn
-        cross = np.cross(v_from, v_to)
-        dot = np.dot(v_from, v_to)
-        cn = np.linalg.norm(cross)
-        if cn < 1e-10:
-            if dot > 0:
-                return np.zeros(3, dtype=np.float32)
-            perp = np.array([1.0, 0.0, 0.0]) if abs(v_from[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
-            return (np.cross(v_from, perp) / np.linalg.norm(np.cross(v_from, perp)) * np.pi).astype(np.float32)
-        return (cross / cn * np.arctan2(cn, dot)).astype(np.float32)
-
-    rj = rest_joints
-    l_hip = _pt("left_hip"); r_hip = _pt("right_hip")
-    l_sh = _pt("left_shoulder"); r_sh = _pt("right_shoulder")
-
-    go = np.zeros(3, dtype=np.float32)
-    tr = np.zeros(3, dtype=np.float32)
-
-    if l_hip is not None and r_hip is not None:
-        tr = ((l_hip + r_hip) / 2.0 - rj[_jidx("pelvis")]).astype(np.float32)
-        hip_axis = r_hip - l_hip
-        rest_hip = rj[_jidx("right_hip")] - rj[_jidx("left_hip")]
-        if l_sh is not None and r_sh is not None:
-            sh_axis = r_sh - l_sh
-            rest_sh = rj[_jidx("right_shoulder")] - rj[_jidx("left_shoulder")]
-            go = ((_rot_between(rest_hip, hip_axis) + _rot_between(rest_sh, sh_axis)) / 2.0).astype(np.float32)
-        else:
-            go = _rot_between(rest_hip, hip_axis)
-
-    return {"global_orient": go, "transl": tr}
-
-
 class RealtimeSmplxTracker:
-    """Body-only per-frame SMPL-X tracker.
-
-    Uses the reference fitter with stripped-down loss terms for faster
-    per-step execution, temporal warm-start, early stopping, and SO(3)
-    post-smoothing.
-    """
+    """Body-only SMPL-X tracker using vectorised Adam optimisation."""
 
     def __init__(self, config: RetargetConfig, output_dir: Path) -> None:
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -98,139 +32,160 @@ class RealtimeSmplxTracker:
         self.config = config
         self.output_dir = output_dir
         self.fitter = _load_reference_fitter()
-        self.device = self.fitter.torch.device(
-            "cuda" if config.device == "cuda" and self.fitter.torch.cuda.is_available() else "cpu"
+        self.T = self.fitter.torch
+        self.device = self.T.device(
+            "cuda" if config.device == "cuda" and self.T.cuda.is_available() else "cpu"
         )
         self.joint_name_to_idx = self.fitter.get_joint_name_to_index()
 
-        base_args = _build_reference_args(config, output_dir, model_dir)
-        self.args = _apply_track_overrides(base_args, config)
-        self.args.early_stop_patience = 3
-        self.args.early_stop_check_interval = 1
-
-        self.init_args = _build_reference_args(config, output_dir, model_dir)
-        _apply_track_overrides(self.init_args, config)
-        self.init_args.root_steps = config.realtime_root_recovery_steps or _default_track_root_steps(config)
-        self.init_args.early_stop_patience = 10
-        self.init_args.early_stop_check_interval = 1
-
         self.model = self.fitter.create_model(
-            self.args.model_dir, self.args.gender,
-            self.args.num_betas, self.args.num_pca_comps, self.device,
+            _resolve_smplx_model_dir(config.model_dir), "neutral", 10, 12, self.device,
         )
+        self.shared_betas = self.T.zeros((1, 10), dtype=self.T.float32, device=self.device)
 
-        self.shared_betas = self.fitter.torch.zeros(
-            (1, self.args.num_betas), dtype=self.fitter.torch.float32, device=self.device,
-        )
+        # Pre-build index tensors
+        body_smplx_map = getattr(self.fitter, "BODY_SMPLX_MAP", {})
+        body_idx = {name: i for i, name in enumerate(BODY_NAMES)}
+        src_l, tgt_l = [], []
+        for bn, sn in body_smplx_map.items():
+            if bn in body_idx and sn in self.joint_name_to_idx:
+                src_l.append(self.joint_name_to_idx[sn])
+                tgt_l.append(body_idx[bn])
+        self._src = self.T.tensor(src_l, device=self.device, dtype=self.T.long)
+        self._tgt_idx = self.T.tensor(tgt_l, device=self.device, dtype=self.T.long)
 
-        # Cache rest pose for geometric root estimation
-        self._rest_joints = self._compute_rest_pose()
-        self._body_idx = {name: i for i, name in enumerate(BODY_NAMES)}
+        # Warm-start state on GPU
+        self._prev_bp = self.T.zeros(1, 63, device=self.device)
+        self._prev_go = self.T.zeros(1, 3, device=self.device)
+        self._prev_tr = self.T.zeros(1, 3, device=self.device)
+        self._has_prev = False
 
         self.aggregate: list[dict[str, np.ndarray]] = []
-        self.prev_result: dict[str, np.ndarray] | None = None
-        self.prev_prev_result: dict[str, np.ndarray] | None = None
-        self.prev_body_axis: np.ndarray | None = None
-        self.prev_body_center: np.ndarray | None = None
 
-    def _compute_rest_pose(self):
-        with self.fitter.torch.no_grad():
-            z = self.fitter.torch.zeros
-            d = self.device
-            output = self.model(
-                betas=z(1, self.args.num_betas, device=d),
-                body_pose=z(1, 63, device=d), global_orient=z(1, 3, device=d),
-                transl=z(1, 3, device=d), left_hand_pose=z(1, 12, device=d),
-                right_hand_pose=z(1, 12, device=d),
-            )
-        return output.joints[0].cpu().numpy().copy()
-
+    # ------------------------------------------------------------------
     def update(self, frame_index: int, points_3d: np.ndarray) -> dict[str, np.ndarray]:
+        T = self.T
         start = time.perf_counter()
-        sequence = _sequence_from_points(points_3d[None, :, :], input_scale=self.config.input_scale)
-        body_axis, body_center = _body_root_features(sequence)
-        root_steps, root_reason = self._select_root_steps(body_axis, body_center, points_3d)
-        self.args.root_steps = root_steps
+        scaled = points_3d.astype(np.float32) * np.float32(self.config.input_scale)
+
+        # Build target
+        target_full = T.from_numpy(scaled).to(self.device)
+        target_23 = target_full[self._tgt_idx]
+        valid_23 = T.isfinite(target_23).all(dim=1)
+        n_valid = int(valid_23.sum())
+        if n_valid < 3:
+            return self._empty_result(frame_index)
+
+        # Fresh parameters from warm-start
+        bp = self._prev_bp.clone().detach().requires_grad_(True)
+        go = self._prev_go.clone().detach().requires_grad_(True)
+        tr = self._prev_tr.clone().detach().requires_grad_(True)
+        p_bp = self._prev_bp.detach().clone()
+        p_go = self._prev_go.detach().clone()
+        p_tr = self._prev_tr.detach().clone()
+        has_prev = self._has_prev
+        zh = T.zeros(1, 12, device=self.device)
+
+        _src = self._src
+        _valid = valid_23
+        _tgt = target_23
+        _model = self.model
+        _betas = self.shared_betas
+        tw = self.config.track_temporal_weight
+
+        # Adam with tuned steps for <50mm @ 10+ FPS
+        n_steps = 45 if not has_prev else 18
         adapter_elapsed = time.perf_counter() - start
 
-        is_init = self.prev_result is None
-        fit_args = self.init_args if is_init else self.args
-        if not is_init:
-            fit_args.root_steps = root_steps
+        optimizer = T.optim.Adam([
+            {"params": [bp], "lr": 0.08},
+            {"params": [go], "lr": 0.05},
+            {"params": [tr], "lr": 0.03},
+        ])
 
-        # Geometric root init (world-space, reliable)
-        scaled = points_3d.astype(np.float32) * np.float32(self.config.input_scale)
-        geo_root = _geometric_root(scaled, self._rest_joints, self._body_idx, self.joint_name_to_idx)
-        zero_hands = np.zeros(12, dtype=np.float32)
+        T.cuda.synchronize()
+        opt_start = time.perf_counter()
+        for _ in range(n_steps):
+            optimizer.zero_grad()
+            out = _model(
+                betas=_betas, body_pose=bp, global_orient=go, transl=tr,
+                left_hand_pose=zh, right_hand_pose=zh,
+            )
+            pred_pts = out.joints[0, _src]
+            diffs = pred_pts[_valid] - _tgt[_valid]
+            loss = (diffs * diffs).sum() / n_valid
+            if has_prev:
+                loss = loss + tw * (
+                    T.mean((bp - p_bp) ** 2)
+                    + 0.5 * T.mean((go - p_go) ** 2)
+                    + 0.3 * T.mean((tr - p_tr) ** 2)
+                )
+            loss.backward()
+            optimizer.step()
+        T.cuda.synchronize()
+        opt_elapsed = time.perf_counter() - opt_start
 
-        if is_init:
-            init_state = {
-                "body_pose": np.zeros(63, dtype=np.float32),
-                "global_orient": geo_root["global_orient"],
-                "transl": geo_root["transl"],
-                "left_hand_pose": zero_hands,
-                "right_hand_pose": zero_hands,
-            }
-        elif self.prev_result is not None:
-            prev_bp = np.asarray(self.prev_result["body_pose"], dtype=np.float32).reshape(63)
-            prev_go = np.asarray(self.prev_result["global_orient"], dtype=np.float32).reshape(3)
-            prev_tr = np.asarray(self.prev_result["transl"], dtype=np.float32).reshape(3)
-            prev_lh = np.asarray(self.prev_result.get("left_hand_pose", zero_hands), dtype=np.float32).reshape(12)
-            prev_rh = np.asarray(self.prev_result.get("right_hand_pose", zero_hands), dtype=np.float32).reshape(12)
-            # Blend geo root 15% + prev 85% for temporal stability
-            init_state = {
-                "body_pose": prev_bp,
-                "global_orient": (geo_root["global_orient"] * 0.15 + prev_go * 0.85).astype(np.float32),
-                "transl": (geo_root["transl"] * 0.15 + prev_tr * 0.85).astype(np.float32),
-                "left_hand_pose": prev_lh,
-                "right_hand_pose": prev_rh,
-            }
-        else:
-            init_state = None
+        with T.no_grad():
+            out = _model(
+                betas=_betas, body_pose=bp, global_orient=go, transl=tr,
+                left_hand_pose=zh, right_hand_pose=zh,
+            )
+            joints = out.joints.cpu().numpy().copy()
+            pred_pts = out.joints[0, _src]
+            df = pred_pts[_valid] - _tgt[_valid]
+            body_err = float(T.mean(T.norm(df, dim=1)).cpu())
 
-        result = self.fitter.fit_single_frame(
-            self.model, None, 0, sequence, self.shared_betas,
-            fit_args, self.joint_name_to_idx, self.device,
-            init_state=init_state,
-            prev_state=self.prev_result,
-            prev_prev_state=self.prev_prev_result,
-        )
-        result["frame_index"] = np.array(frame_index, dtype=np.int32)
-        result["retarget_root_steps"] = np.array(root_steps, dtype=np.int32)
-        result["retarget_root_reason"] = np.array(root_reason)
+        result = {
+            "frame_index": np.array(frame_index, dtype=np.int32),
+            "betas": _betas.cpu().numpy().copy(),
+            "global_orient": go.detach().cpu().numpy().copy(),
+            "body_pose": bp.detach().cpu().numpy().copy(),
+            "left_hand_pose": np.zeros((1, 12), dtype=np.float32),
+            "right_hand_pose": np.zeros((1, 12), dtype=np.float32),
+            "transl": tr.detach().cpu().numpy().copy(),
+            "smplx_joints": joints,
+            "overall_mean_error_m": np.array(body_err, dtype=np.float32),
+            "body_mean_error_m": np.array(body_err, dtype=np.float32),
+            "left_hand_mean_error_m": np.array(0.0, dtype=np.float32),
+            "right_hand_mean_error_m": np.array(0.0, dtype=np.float32),
+        }
 
         if self.config.profile:
-            timings = dict(result.get("stage_timings", {}))
-            timings["input_adapter_s"] = adapter_elapsed
-            timings["track_update_s"] = time.perf_counter() - start
-            result["stage_timings"] = timings
+            result["stage_timings"] = {
+                "input_adapter_s": adapter_elapsed,
+                "adam_optimize_s": opt_elapsed,
+                "track_update_s": time.perf_counter() - start,
+            }
             if len(self.aggregate) == 0 or frame_index % max(1, self.config.profile_interval) == 0:
-                print(_format_timing_line(frame_index, timings, root_steps, root_reason), flush=True)
+                print(
+                    f"[mocap-profile] frame={frame_index} stage=track adam "
+                    f"opt={opt_elapsed*1000:.1f}ms body_err={body_err:.4f}m",
+                    flush=True,
+                )
 
         self.aggregate.append(result)
-        self.prev_prev_result = self.prev_result
-        self.prev_result = result
-        self.prev_body_axis = body_axis
-        self.prev_body_center = body_center
+        self._prev_bp = bp.detach().clone()
+        self._prev_go = go.detach().clone()
+        self._prev_tr = tr.detach().clone()
+        self._has_prev = True
+
         return result
 
-    def _select_root_steps(self, body_axis, body_center, points_3d=None):
-        if not self.config.realtime_adaptive_root:
-            return self.config.root_steps, "fixed"
-        recovery = self.config.realtime_root_recovery_steps or _default_track_root_steps(self.config)
-        if self.prev_result is None:
-            return recovery, "init"
-        prev_err = float(self.prev_result.get("body_mean_error_m", float("inf")))
-        if prev_err > self.config.realtime_root_error_threshold_m:
-            return recovery, "error"
-        if (body_axis is not None and self.prev_body_axis is not None
-                and _vector_angle_deg(body_axis, self.prev_body_axis) > self.config.realtime_root_turn_threshold_deg):
-            return recovery, "turn"
-        if (body_center is not None and self.prev_body_center is not None
-                and float(np.linalg.norm(body_center - self.prev_body_center))
-                > self.config.realtime_root_translation_threshold_m):
-            return recovery, "translation"
-        return max(1, self.config.realtime_root_steps), "steady"
+    def _empty_result(self, frame_index: int = 0) -> dict[str, np.ndarray]:
+        return {
+            "frame_index": np.array(frame_index, dtype=np.int32),
+            "betas": self.shared_betas.cpu().numpy().copy(),
+            "global_orient": np.zeros((1, 3), dtype=np.float32),
+            "body_pose": np.zeros((1, 63), dtype=np.float32),
+            "left_hand_pose": np.zeros((1, 12), dtype=np.float32),
+            "right_hand_pose": np.zeros((1, 12), dtype=np.float32),
+            "transl": np.zeros((1, 3), dtype=np.float32),
+            "smplx_joints": np.zeros((1, 127, 3), dtype=np.float32),
+            "overall_mean_error_m": np.array(np.nan, dtype=np.float32),
+            "body_mean_error_m": np.array(np.nan, dtype=np.float32),
+            "left_hand_mean_error_m": np.array(0.0, dtype=np.float32),
+            "right_hand_mean_error_m": np.array(0.0, dtype=np.float32),
+        }
 
     def save(self, source_npz: Path | None = None) -> Path:
         if not self.aggregate:
@@ -251,11 +206,11 @@ def _apply_so3_smooth(aggregate: list[dict[str, np.ndarray]], sigma: float) -> N
     tr = np.stack([item["transl"].reshape(3) for item in aggregate], axis=0)
     sbp = gaussian_filter1d(bp, sigma=sigma, axis=0)
     sgo = gaussian_filter1d(go, sigma=sigma, axis=0)
-    str_ = gaussian_filter1d(tr, sigma=sigma, axis=0)
+    st = gaussian_filter1d(tr, sigma=sigma, axis=0)
     for i, item in enumerate(aggregate):
         item["body_pose"] = sbp[i].reshape(1, 63).astype(np.float32)
         item["global_orient"] = sgo[i].reshape(1, 3).astype(np.float32)
-        item["transl"] = str_[i].reshape(1, 3).astype(np.float32)
+        item["transl"] = st[i].reshape(1, 3).astype(np.float32)
 
 
 def _apply_track_overrides(base_args: argparse.Namespace, config: RetargetConfig) -> argparse.Namespace:
