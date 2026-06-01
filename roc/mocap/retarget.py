@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import enum
 import importlib.util
 import json
 import os
 import sys
 import time
 import types
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -16,9 +17,15 @@ import numpy as np
 import yaml
 
 
+class RetargetMode(enum.Enum):
+    FIT = "fit"
+    TRACK = "track"
+
+
 @dataclass(slots=True)
 class RetargetConfig:
     model_dir: Path
+    mode: RetargetMode = RetargetMode.FIT
     vposer_dir: Path | None = None
     output_dir: Path | None = None
     device: str = "cpu"
@@ -49,6 +56,14 @@ class RetargetConfig:
     save_debug_assets: bool = False
     profile: bool = False
     profile_interval: int = 25
+    # Tracking-specific parameters (used only in TRACK mode)
+    track_pose_steps: int = 20
+    track_temporal_weight: float = 0.8
+    track_velocity_weight: float = 0.04
+    track_acceleration_weight: float = 0.008
+    track_recovery_interval: int = 30
+    track_recovery_pose_steps: int = 60
+    track_recovery_body_error_threshold_m: float = 0.15
 
 
 class RealtimeSmplxRetargeter:

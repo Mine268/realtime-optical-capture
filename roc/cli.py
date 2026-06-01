@@ -188,6 +188,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="After 3D keypoints are saved, retarget them to SMPL-X joint rotations",
     )
     mocap_parser.add_argument(
+        "--retarget-mode",
+        default="fit",
+        choices=["fit", "track"],
+        help="SMPL-X retargeting mode: fit uses full optimization, track uses body-only fast tracking",
+    )
+    mocap_parser.add_argument(
         "--retarget-model-dir",
         type=Path,
         default=Path("models/smplx"),
@@ -409,10 +415,11 @@ def main() -> None:
                 parser.error("--retarget-realtime-root-turn-threshold must be > 0")
             if args.retarget_realtime_root_translation_threshold <= 0.0:
                 parser.error("--retarget-realtime-root-translation-threshold must be > 0")
-            from roc.mocap.retarget import RetargetConfig
+            from roc.mocap.retarget import RetargetConfig, RetargetMode
 
             retarget_config = RetargetConfig(
                 model_dir=args.retarget_model_dir,
+                mode=RetargetMode(args.retarget_mode),
                 vposer_dir=args.retarget_vposer_dir,
                 device=retarget_device,
                 betas_steps=args.retarget_betas_steps,

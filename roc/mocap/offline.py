@@ -17,7 +17,7 @@ from roc.mocap.logging_utils import tee_to_log
 from roc.mocap.render_2d_overlays import render_all_overlays
 from roc.mocap.render_npz import render_npz_to_video
 from roc.mocap.render_reprojection_overlays import render_reprojection_overlays, render_smplx_reprojection_overlays
-from roc.mocap.retarget import RetargetConfig, run_mocap_retarget
+from roc.mocap.retarget import RetargetConfig, RetargetMode, run_mocap_retarget
 from roc.tracking.mediapipe_tracker import MediapipeTracker
 from roc.tracking.model_paths import hand_model_path, pose_model_path_for_complexity
 from roc.triangulation.cameras import camera_group_names, camera_order_indices, load_camera_group_from_toml
@@ -369,7 +369,11 @@ def _finalize(
         )
     retarget_npz = None
     if retarget_config is not None:
-        print("Retargeting 3D keypoints to SMPL-X joint rotations...")
+        if retarget_config.mode == RetargetMode.TRACK:
+            _apply_track_config_overrides(retarget_config)
+            print("Retargeting 3D keypoints to SMPL-X joint rotations (track mode)...")
+        else:
+            print("Retargeting 3D keypoints to SMPL-X joint rotations...")
         retarget_npz = run_mocap_retarget(
             npz_path=session_paths.mocap_npz_path,
             mocap_session=session_paths.session_dir,
@@ -422,3 +426,13 @@ def _read_video_fps(video_dir: Path) -> float:
         finally:
             cap.release()
     return 5.0
+
+
+def _apply_track_config_overrides(config: RetargetConfig) -> None:
+    config.pose_steps = config.track_pose_steps
+    config.temporal_weight = config.track_temporal_weight
+    config.velocity_weight = config.track_velocity_weight
+    config.acceleration_weight = config.track_acceleration_weight
+    config.lower_body_refine = False
+    config.optimize_hands = False
+    config.use_vposer = False

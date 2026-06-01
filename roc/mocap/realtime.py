@@ -18,7 +18,8 @@ from roc.mocap.postprocess import RealtimePostprocessor
 from roc.mocap.render_2d_overlays import render_all_overlays
 from roc.mocap.render_npz import render_npz_to_video
 from roc.mocap.render_reprojection_overlays import render_reprojection_overlays, render_smplx_reprojection_overlays
-from roc.mocap.retarget import RealtimeSmplxRetargeter, RetargetConfig
+from roc.mocap.retarget import RealtimeSmplxRetargeter, RetargetConfig, RetargetMode
+from roc.mocap.track import RealtimeSmplxTracker
 from roc.mvs import MvsSystem, OfflineMvsSystem
 from roc.tracking.mediapipe_tracker import MediapipeTracker
 from roc.tracking.model_paths import hand_model_path, pose_model_path_for_complexity
@@ -140,11 +141,16 @@ def run_mocap_realtime(
                     if retarget_config is not None
                     else None
                 )
-                realtime_retargeter = (
-                    RealtimeSmplxRetargeter(retarget_config, session_paths.session_dir / "smplx_retarget")
-                    if retarget_config is not None
-                    else None
-                )
+                realtime_retargeter = None
+                if retarget_config is not None:
+                    if retarget_config.mode == RetargetMode.TRACK:
+                        realtime_retargeter = RealtimeSmplxTracker(
+                            retarget_config, session_paths.session_dir / "smplx_retarget"
+                        )
+                    else:
+                        realtime_retargeter = RealtimeSmplxRetargeter(
+                            retarget_config, session_paths.session_dir / "smplx_retarget"
+                        )
                 trackers = {
                     serial: stack.enter_context(
                         MediapipeTracker(
