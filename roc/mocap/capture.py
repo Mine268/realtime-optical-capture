@@ -9,7 +9,7 @@ import yaml
 
 from roc.config.models import MocapConfig
 from roc.config.yaml_io import load_capture_config, save_capture_config, save_mocap_config
-from roc.io.sessions import create_mocap_session
+from roc.io.sessions import get_existing_mocap_session
 from roc.mocap.logging_utils import tee_to_log
 from roc.mvs import MvsSystem, OfflineMvsSystem
 from roc.mocap.sync_capture import SyncCaptureWorker, transcode_raw_frames_to_videos
@@ -18,7 +18,7 @@ from roc.mocap.sync_capture import SyncCaptureWorker, transcode_raw_frames_to_vi
 def run_mocap_capture(
     prepare_session: Path,
     calib_session: Path,
-    session_root: Path,
+    mocap_session: Path,
     fps: float,
     max_frames: int,
     show_preview: bool,
@@ -34,7 +34,7 @@ def run_mocap_capture(
         raise RuntimeError(f"Calibration yaml not found: {calibration_yaml_path}")
 
     capture_config = load_capture_config(capture_config_path)
-    session_paths = create_mocap_session(session_root)
+    session_paths = get_existing_mocap_session(mocap_session)
     save_capture_config(session_paths.capture_config_path, capture_config)
     session_paths.calibration_yaml_path.write_text(calibration_yaml_path.read_text(encoding="utf-8"), encoding="utf-8")
 

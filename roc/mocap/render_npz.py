@@ -117,18 +117,22 @@ def _draw_edges(ax, frame_points: dict[str, np.ndarray], edges, color: str) -> N
         ax.plot([a[0], b[0]], [a[1], b[1]], [a[2], b[2]], color=color, linewidth=2)
 
 
-def main() -> None:
-    args = parse_args()
-    data = np.load(args.npz_path, allow_pickle=True)
+def render_npz_to_video(
+    npz_path: Path,
+    output_path: Path | None = None,
+    fps: float = 15.0,
+    frame_limit: int = 0,
+) -> None:
+    data = np.load(npz_path, allow_pickle=True)
     points_3d = data["points_3d"]
     landmark_names = [str(name) for name in data["landmark_names"]]
     reprojection = data["reprojection_error"] if "reprojection_error" in data.files else None
 
     frame_count = points_3d.shape[0]
-    if args.frame_limit > 0:
-        frame_count = min(frame_count, args.frame_limit)
+    if frame_limit > 0:
+        frame_count = min(frame_count, frame_limit)
 
-    output_path = args.output_path or args.npz_path.with_name(args.npz_path.stem + "_preview.mp4")
+    output_path = output_path or npz_path.with_name(npz_path.stem + "_preview.mp4")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temp_output_path = output_path.with_name(output_path.stem + ".render_tmp.avi")
 
@@ -169,15 +173,25 @@ def main() -> None:
             image = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8).reshape(height, width, 4)
             image_bgr = cv2.cvtColor(image, cv2.COLOR_RGBA2BGR)
             if writer is None:
-                writer = build_mjpg_writer(temp_output_path, width, height, args.fps)
+                writer = build_mjpg_writer(temp_output_path, width, height, fps)
             writer.write(image_bgr)
     finally:
         plt.close(fig)
         if writer is not None:
             writer.release()
 
-    _encode_h264_mp4(temp_output_path, output_path, args.fps)
+    _encode_h264_mp4(temp_output_path, output_path, fps)
     print(f"Saved mocap preview video to: {output_path}")
+
+
+def main() -> None:
+    args = parse_args()
+    render_npz_to_video(
+        npz_path=args.npz_path,
+        output_path=args.output_path,
+        fps=args.fps,
+        frame_limit=args.frame_limit,
+    )
 
 
 def _encode_h264_mp4(temp_output_path: Path, output_path: Path, fps: float) -> None:

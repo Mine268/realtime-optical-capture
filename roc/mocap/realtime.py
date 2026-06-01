@@ -11,9 +11,12 @@ import numpy as np
 
 from roc.config.models import MocapConfig
 from roc.config.yaml_io import load_capture_config, save_capture_config, save_mocap_config
-from roc.io.sessions import create_mocap_session
+from roc.io.sessions import get_existing_mocap_session
 from roc.mocap.common import build_temp_video_writer, finalize_videos_with_actual_fps, save_mocap_outputs
 from roc.mocap.logging_utils import tee_to_log
+from roc.mocap.render_2d_overlays import render_all_overlays
+from roc.mocap.render_npz import render_npz_to_video
+from roc.mocap.render_reprojection_overlays import render_reprojection_overlays
 from roc.mvs import MvsSystem, OfflineMvsSystem
 from roc.tracking.mediapipe_tracker import MediapipeTracker
 from roc.tracking.model_paths import hand_model_path, pose_model_path_for_complexity
@@ -24,7 +27,7 @@ from roc.triangulation.triangulate import triangulate_sequence
 def run_mocap_realtime(
     prepare_session: Path,
     calib_session: Path,
-    session_root: Path,
+    mocap_session: Path,
     fps: float,
     max_frames: int,
     hands_enabled: bool,
@@ -46,8 +49,11 @@ def run_mocap_realtime(
     if not calibration_toml_path.is_file():
         raise RuntimeError(f"Calibration toml not found: {calibration_toml_path}")
 
+    if offline_source_dir is None:
+        mocap_session.mkdir(parents=True, exist_ok=True)
+
     capture_config = load_capture_config(capture_config_path)
-    session_paths = create_mocap_session(session_root)
+    session_paths = get_existing_mocap_session(mocap_session)
     save_capture_config(session_paths.capture_config_path, capture_config)
     session_paths.calibration_yaml_path.write_text(calibration_yaml_path.read_text(encoding="utf-8"), encoding="utf-8")
 
@@ -91,6 +97,10 @@ def run_mocap_realtime(
             right_hand_2d = []
             right_hand_conf = []
             bboxes = []
+            record_videos = (
+                offline_source_dir is None
+                or offline_source_dir.resolve() != session_paths.videos_dir.resolve()
+            )
 
             system = OfflineMvsSystem(offline_source_dir, serials=capture_config.camera_serials) if offline_source_dir else MvsSystem()
             with system as mvs, ExitStack() as stack:
@@ -153,7 +163,7 @@ def run_mocap_realtime(
                             if frame is None:
                                 raise RuntimeError(f"No frame received for camera {serial}")
 
-                            if serial not in writers:
+                            if record_videos and serial not in writers:
                                 temp_path = session_paths.videos_dir / f"{serial}.capture_tmp.avi"
                                 temp_video_paths[serial] = temp_path
                                 writers[serial] = build_temp_video_writer(
@@ -162,7 +172,8 @@ def run_mocap_realtime(
                                     frame.shape[0],
                                     fps,
                                 )
-                            writers[serial].write(frame)
+                            if record_videos:
+                                writers[serial].write(frame)
 
                             tracker = trackers[serial]
                             pose_result = tracker.detect_pose(frame, timestamp_ms=timestamp_ms)
@@ -270,6 +281,28 @@ def run_mocap_realtime(
                 hands_enabled=hands_enabled,
                 model_complexity=model_complexity,
                 postprocess_mode="realtime",
+            )
+            render_all_overlays(
+                npz_path=session_paths.mocap_npz_path,
+                video_dir=session_paths.videos_dir,
+                output_dir=session_paths.overlay_videos_dir,
+                confidence_threshold=0.1,
+                frame_limit=0,
+            )
+            render_reprojection_overlays(
+                npz_path=session_paths.mocap_npz_path,
+                calibration_toml=calibration_toml_path,
+                video_dir=session_paths.videos_dir,
+                output_dir=session_paths.session_dir / "reprojection_videos",
+                points_key="points_3d",
+                confidence_threshold=0.1,
+                frame_limit=0,
+            )
+            render_npz_to_video(
+                npz_path=session_paths.mocap_npz_path,
+                output_path=session_paths.session_dir / "pose_videos" / "mocap_3d_pose.mp4",
+                fps=actual_fps,
+                frame_limit=0,
             )
             print(f"Saved mocap session to: {session_paths.session_dir}")
         except Exception:

@@ -11,9 +11,11 @@ import numpy as np
 from roc.config.models import MocapConfig
 from roc.config.yaml_io import load_capture_config, save_capture_config, save_mocap_config
 from roc.io.sessions import get_existing_mocap_session
-from roc.mocap.common import prepare_mocap_session, save_mocap_outputs
+from roc.mocap.common import save_mocap_outputs
 from roc.mocap.logging_utils import tee_to_log
 from roc.mocap.render_2d_overlays import render_all_overlays
+from roc.mocap.render_npz import render_npz_to_video
+from roc.mocap.render_reprojection_overlays import render_reprojection_overlays
 from roc.tracking.mediapipe_tracker import MediapipeTracker
 from roc.tracking.model_paths import hand_model_path, pose_model_path_for_complexity
 from roc.triangulation.cameras import camera_group_names, camera_order_indices, load_camera_group_from_toml
@@ -24,7 +26,7 @@ def run_mocap_offline(
     prepare_session: Path,
     calib_session: Path,
     video_dir: Path | None,
-    session_root: Path,
+    mocap_session: Path,
     max_frames: int,
     hands_enabled: bool,
     model_complexity: int,
@@ -34,58 +36,42 @@ def run_mocap_offline(
 ) -> None:
     prepare_session = prepare_session.resolve()
     calib_session = calib_session.resolve()
+    mocap_session = mocap_session.resolve()
     calibration_toml_path = calib_session / "calibration.toml"
     if not calibration_toml_path.is_file():
         raise RuntimeError(f"Calibration toml not found: {calibration_toml_path}")
 
-    source_video_dir, output_session_dir = _resolve_video_dir_and_output_session(
-        video_dir=video_dir,
-        calib_session=calib_session,
-    )
+    source_video_dir = (video_dir or mocap_session / "videos").resolve()
     if not source_video_dir.is_dir():
         raise RuntimeError(f"Video directory not found: {source_video_dir}")
 
-    if output_session_dir is not None:
-        session_paths = get_existing_mocap_session(output_session_dir)
-        capture_config_path = prepare_session / "capture_config.yaml"
-        calibration_yaml_path = calib_session / "calibration.yaml"
-        if not capture_config_path.is_file():
-            raise RuntimeError(f"Prepare capture_config.yaml not found: {capture_config_path}")
-        if not calibration_yaml_path.is_file():
-            raise RuntimeError(f"Calibration yaml not found: {calibration_yaml_path}")
-        capture_config = load_capture_config(capture_config_path)
-        if not session_paths.capture_config_path.is_file():
-            save_capture_config(session_paths.capture_config_path, capture_config)
-        if not session_paths.calibration_yaml_path.is_file():
-            session_paths.calibration_yaml_path.write_text(
-                calibration_yaml_path.read_text(encoding="utf-8"),
-                encoding="utf-8",
-            )
-        estimate_config = MocapConfig(
-            schema_version=1,
-            created_at=datetime.now().astimezone().isoformat(timespec="seconds"),
-            prepare_session=str(prepare_session),
-            calib_session=str(calib_session),
-            mode="capture_estimate",
-            fps=_read_video_fps(source_video_dir),
-            max_frames=max_frames,
-            hands_enabled=hands_enabled,
-            model_complexity=model_complexity,
-            video_format="mp4",
-            lossless=False,
-        )
-        save_mocap_config(session_paths.session_dir / "mocap_estimate_config.yaml", estimate_config)
-    else:
-        session_paths, capture_config = prepare_mocap_session(
-            prepare_session=prepare_session,
-            calib_session=calib_session,
-            session_root=session_root,
-            mode="capture_estimate",
-            fps=_read_video_fps(source_video_dir),
-            max_frames=max_frames,
-            hands_enabled=hands_enabled,
-            model_complexity=model_complexity,
-        )
+    session_paths = get_existing_mocap_session(mocap_session)
+    capture_config_path = prepare_session / "capture_config.yaml"
+    calibration_yaml_path = calib_session / "calibration.yaml"
+    if not capture_config_path.is_file():
+        raise RuntimeError(f"Prepare capture_config.yaml not found: {capture_config_path}")
+    if not calibration_yaml_path.is_file():
+        raise RuntimeError(f"Calibration yaml not found: {calibration_yaml_path}")
+    capture_config = load_capture_config(capture_config_path)
+    save_capture_config(session_paths.capture_config_path, capture_config)
+    session_paths.calibration_yaml_path.write_text(
+        calibration_yaml_path.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    estimate_config = MocapConfig(
+        schema_version=1,
+        created_at=datetime.now().astimezone().isoformat(timespec="seconds"),
+        prepare_session=str(prepare_session),
+        calib_session=str(calib_session),
+        mode="capture_estimate",
+        fps=_read_video_fps(source_video_dir),
+        max_frames=max_frames,
+        hands_enabled=hands_enabled,
+        model_complexity=model_complexity,
+        video_format="mp4",
+        lossless=False,
+    )
+    save_mocap_config(session_paths.session_dir / "mocap_estimate_config.yaml", estimate_config)
     with tee_to_log(session_paths.logs_dir / "mocap.log"):
         try:
             print(f"Prepare session: {prepare_session}")
@@ -179,6 +165,7 @@ def run_mocap_offline(
                                     source_video_dir,
                                     source_fps,
                                     postprocess_mode,
+                                    calibration_toml_path,
                                 )
 
                             tracker = trackers[serial]
@@ -254,6 +241,7 @@ def run_mocap_offline(
                 source_video_dir,
                 source_fps,
                 postprocess_mode,
+                calibration_toml_path,
             )
         except Exception:
             traceback.print_exc()
@@ -278,6 +266,7 @@ def _finalize(
     source_video_dir,
     source_fps,
     postprocess_mode,
+    calibration_toml_path,
 ) -> None:
     if not timestamps:
         raise RuntimeError("No mocap frames were processed")
@@ -331,6 +320,21 @@ def _finalize(
         confidence_threshold=0.1,
         frame_limit=0,
     )
+    render_reprojection_overlays(
+        npz_path=session_paths.mocap_npz_path,
+        calibration_toml=calibration_toml_path,
+        video_dir=source_video_dir,
+        output_dir=session_paths.session_dir / "reprojection_videos",
+        points_key="points_3d",
+        confidence_threshold=0.1,
+        frame_limit=0,
+    )
+    render_npz_to_video(
+        npz_path=session_paths.mocap_npz_path,
+        output_path=session_paths.session_dir / "pose_videos" / "mocap_3d_pose.mp4",
+        fps=source_fps,
+        frame_limit=0,
+    )
     print(f"Saved offline mocap session to: {session_paths.session_dir}")
 
 
@@ -345,18 +349,3 @@ def _read_video_fps(video_dir: Path) -> float:
         finally:
             cap.release()
     return 5.0
-
-
-def _resolve_video_dir_and_output_session(
-    video_dir: Path | None,
-    calib_session: Path,
-) -> tuple[Path, Path | None]:
-    if video_dir is None:
-        return calib_session / "videos", None
-
-    resolved = video_dir.resolve()
-    if resolved.name == "videos" and resolved.parent.name.startswith("mocap_"):
-        return resolved, resolved.parent
-    if resolved.name.startswith("mocap_") and (resolved / "videos").is_dir():
-        return resolved / "videos", resolved
-    return resolved, None

@@ -1,15 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime
 from pathlib import Path
 
 import cv2
 import numpy as np
 import yaml
 
-from roc.config.models import MocapConfig
-from roc.config.yaml_io import load_capture_config, save_capture_config, save_mocap_config
-from roc.io.sessions import MocapSessionPaths, create_mocap_session
+from roc.io.sessions import MocapSessionPaths
 from roc.io.video import build_mjpg_writer, encode_h264_mp4
 from roc.mocap.postprocess import RealtimePostprocessor, postprocess_points_3d
 from roc.tracking.mediapipe_tracker import HAND_LANDMARK_NAMES, POSE_LANDMARK_NAMES
@@ -40,45 +37,6 @@ def finalize_videos_with_actual_fps(
             temp_path.unlink(missing_ok=True)
 
     return actual_fps
-
-
-def prepare_mocap_session(
-    prepare_session: Path,
-    calib_session: Path,
-    session_root: Path,
-    mode: str,
-    fps: float,
-    max_frames: int,
-    hands_enabled: bool,
-    model_complexity: int,
-) -> tuple[MocapSessionPaths, object]:
-    capture_config_path = prepare_session / "capture_config.yaml"
-    calibration_yaml_path = calib_session / "calibration.yaml"
-    if not capture_config_path.is_file():
-        raise RuntimeError(f"Prepare capture_config.yaml not found: {capture_config_path}")
-    if not calibration_yaml_path.is_file():
-        raise RuntimeError(f"Calibration yaml not found: {calibration_yaml_path}")
-
-    capture_config = load_capture_config(capture_config_path)
-    session_paths = create_mocap_session(session_root)
-    save_capture_config(session_paths.capture_config_path, capture_config)
-    session_paths.calibration_yaml_path.write_text(calibration_yaml_path.read_text(encoding="utf-8"), encoding="utf-8")
-
-    mocap_config = MocapConfig(
-        schema_version=1,
-        created_at=datetime.now().astimezone().isoformat(timespec="seconds"),
-        prepare_session=str(prepare_session),
-        calib_session=str(calib_session),
-        mode=mode,
-        fps=fps,
-        max_frames=max_frames,
-        hands_enabled=hands_enabled,
-        model_complexity=model_complexity,
-        video_format="mp4",
-        lossless=False,
-    )
-    save_mocap_config(session_paths.mocap_config_path, mocap_config)
-    return session_paths, capture_config
 
 
 def save_mocap_outputs(

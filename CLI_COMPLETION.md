@@ -24,7 +24,7 @@ eval "$(register-python-argcomplete roc)"
 ```bash
 roc <TAB>
 roc mocap --mode <TAB>
-roc mocap --video-dir sessions/<TAB>
+roc mocap --mocap-session sessions/<TAB>
 ```
 
 ## 持久启用

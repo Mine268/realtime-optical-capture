@@ -121,10 +121,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to a calibration session directory",
     )
     mocap_parser.add_argument(
-        "--session-root",
+        "--mocap-session",
         type=Path,
-        default=Path("sessions"),
-        help="Root directory for generated sessions",
+        required=True,
+        help="Path to the mocap session directory used for all mocap inputs and outputs",
     )
     mocap_parser.add_argument(
         "--fps",
@@ -158,7 +158,7 @@ def build_parser() -> argparse.ArgumentParser:
     mocap_parser.add_argument(
         "--video-dir",
         type=Path,
-        help="Optional directory containing per-camera mp4 files for capture_estimate mode; defaults to calib session videos/",
+        help="Optional directory containing per-camera mp4 files for capture_estimate mode; defaults to <mocap-session>/videos/",
     )
     mocap_parser.add_argument(
         "--postprocess-mode",
@@ -231,7 +231,7 @@ def main() -> None:
             run_mocap_realtime(
                 prepare_session=args.prepare_session,
                 calib_session=args.calib_session,
-                session_root=args.session_root,
+                mocap_session=args.mocap_session,
                 fps=args.fps,
                 max_frames=args.frames,
                 hands_enabled=not args.no_hands,
@@ -249,7 +249,7 @@ def main() -> None:
                 prepare_session=args.prepare_session,
                 calib_session=args.calib_session,
                 video_dir=args.video_dir,
-                session_root=args.session_root,
+                mocap_session=args.mocap_session,
                 max_frames=args.frames,
                 hands_enabled=not args.no_hands,
                 model_complexity=args.model_complexity,
@@ -265,7 +265,7 @@ def main() -> None:
             run_mocap_capture(
                 prepare_session=args.prepare_session,
                 calib_session=args.calib_session,
-                session_root=args.session_root,
+                mocap_session=args.mocap_session,
                 fps=args.fps,
                 max_frames=args.frames,
                 show_preview=args.show_preview,
