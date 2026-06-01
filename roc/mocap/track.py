@@ -58,7 +58,11 @@ class RealtimeSmplxTracker:
         self._prev_bp = self.T.zeros(1, 63, device=self.device)
         self._prev_go = self.T.zeros(1, 3, device=self.device)
         self._prev_tr = self.T.zeros(1, 3, device=self.device)
+        self._prev_prev_bp = self.T.zeros(1, 63, device=self.device)
+        self._prev_prev_go = self.T.zeros(1, 3, device=self.device)
+        self._prev_prev_tr = self.T.zeros(1, 3, device=self.device)
         self._has_prev = False
+        self._has_prev_prev = False
 
         self.aggregate: list[dict[str, np.ndarray]] = []
 
@@ -83,7 +87,11 @@ class RealtimeSmplxTracker:
         p_bp = self._prev_bp.detach().clone()
         p_go = self._prev_go.detach().clone()
         p_tr = self._prev_tr.detach().clone()
+        pp_bp = self._prev_prev_bp.detach().clone()
+        pp_go = self._prev_prev_go.detach().clone()
+        pp_tr = self._prev_prev_tr.detach().clone()
         has_prev = self._has_prev
+        has_pp = self._has_prev_prev
         zh = T.zeros(1, 12, device=self.device)
 
         _src = self._src
@@ -136,6 +144,24 @@ class RealtimeSmplxTracker:
                     + 0.5 * T.mean((go - p_go) ** 2)
                     + 0.3 * T.mean((tr - p_tr) ** 2)
                 )
+            if has_pp:
+                vw = self.config.track_velocity_weight
+                if vw > 0:
+                    cv_bp = bp - p_bp; pv_bp = p_bp - pp_bp
+                    cv_go = go - p_go; pv_go = p_go - pp_go
+                    cv_tr = tr - p_tr; pv_tr = p_tr - pp_tr
+                    loss = loss + vw * (
+                        T.mean((cv_bp - pv_bp) ** 2)
+                        + 0.3 * T.mean((cv_go - pv_go) ** 2)
+                        + 0.2 * T.mean((cv_tr - pv_tr) ** 2)
+                    )
+                aw = self.config.track_acceleration_weight
+                if aw > 0:
+                    loss = loss + aw * (
+                        T.mean((bp - 2 * p_bp + pp_bp) ** 2)
+                        + 0.3 * T.mean((go - 2 * p_go + pp_go) ** 2)
+                        + 0.2 * T.mean((tr - 2 * p_tr + pp_tr) ** 2)
+                    )
             loss.backward()
             optimizer.step()
         T.cuda.synchronize()
@@ -180,10 +206,14 @@ class RealtimeSmplxTracker:
                 )
 
         self.aggregate.append(result)
+        self._prev_prev_bp = self._prev_bp.clone()
+        self._prev_prev_go = self._prev_go.clone()
+        self._prev_prev_tr = self._prev_tr.clone()
         self._prev_bp = bp.detach().clone()
         self._prev_go = go.detach().clone()
         self._prev_tr = tr.detach().clone()
         self._has_prev = True
+        self._has_prev_prev = has_prev
 
         return result
 
@@ -206,7 +236,7 @@ class RealtimeSmplxTracker:
     def save(self, source_npz: Path | None = None) -> Path:
         if not self.aggregate:
             raise RuntimeError("No track frames were produced")
-        _apply_so3_smooth(self.aggregate, sigma=0.15)
+        _apply_so3_smooth(self.aggregate, sigma=0.30)
         sequence_path = self.output_dir / "smplx_fit_sequence.npz"
         _save_sequence_npz(sequence_path, self.aggregate, self.config, source_npz=source_npz)
         _write_track_report(self.output_dir, source_npz, sequence_path, self.aggregate, self.config)

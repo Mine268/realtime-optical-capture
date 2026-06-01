@@ -58,9 +58,9 @@ class RetargetConfig:
     profile_interval: int = 25
     # Tracking-specific parameters (used only in TRACK mode)
     track_pose_steps: int = 20
-    track_temporal_weight: float = 0.8
-    track_velocity_weight: float = 0.04
-    track_acceleration_weight: float = 0.008
+    track_temporal_weight: float = 0.20
+    track_velocity_weight: float = 0.02
+    track_acceleration_weight: float = 0.004
     track_recovery_interval: int = 30
     track_recovery_pose_steps: int = 60
     track_recovery_body_error_threshold_m: float = 0.15
