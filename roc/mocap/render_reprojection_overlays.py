@@ -302,6 +302,9 @@ def render_smplx_reprojection_overlays(
     camera_serials = [str(serial) for serial in mocap_data["camera_serials"]]
     frame_indices = np.asarray(smplx_data["frame_indices"], dtype=np.int32)
     smplx_joints = np.asarray(smplx_data["smplx_joints"], dtype=np.float32)
+    # squeeze extra batch dim: (F, 1, J, 3) → (F, J, 3)
+    if smplx_joints.ndim == 4 and smplx_joints.shape[1] == 1:
+        smplx_joints = smplx_joints[:, 0, :, :]
     input_scale = float(np.asarray(smplx_data["input_scale"]).reshape(())) if "input_scale" in smplx_data.files else 0.001
     if input_scale <= 0:
         raise RuntimeError(f"Invalid SMPL-X input_scale in {smplx_npz_path}: {input_scale}")

@@ -93,8 +93,8 @@ class RealtimeSmplxTracker:
         _betas = self.shared_betas
         tw = self.config.track_temporal_weight
 
-        # Adam with tuned steps for <50mm @ 10+ FPS
-        n_steps = 45 if not has_prev else 18
+        # Adam with pose prior to prevent unnatural joint angles
+        n_steps = 55 if not has_prev else 18
         adapter_elapsed = time.perf_counter() - start
 
         optimizer = T.optim.Adam([
@@ -102,6 +102,10 @@ class RealtimeSmplxTracker:
             {"params": [go], "lr": 0.05},
             {"params": [tr], "lr": 0.03},
         ])
+
+        wp = 0.10  # pose prior: L2 on body_pose to stay near rest pose
+        wk = 0.005  # light knee penalty to avoid hyperextension
+        ws = 0.03   # spine penalty to maintain torso length
 
         T.cuda.synchronize()
         opt_start = time.perf_counter()
@@ -114,6 +118,18 @@ class RealtimeSmplxTracker:
             pred_pts = out.joints[0, _src]
             diffs = pred_pts[_valid] - _tgt[_valid]
             loss = (diffs * diffs).sum() / n_valid
+
+            # Pose prior: keeps all joints near rest pose
+            loss = loss + wp * T.mean(bp ** 2)
+
+            # Knee: light penalty (joints 3=l_knee@9:12, 4=r_knee@12:15)
+            loss = loss + wk * (T.mean(bp[:, 9:12] ** 2) + T.mean(bp[:, 12:15] ** 2))
+
+            # Spine: maintain torso height (spine1@6:9, spine2@15:18, spine3@24:27)
+            loss = loss + ws * (
+                T.mean(bp[:, 6:9] ** 2) + T.mean(bp[:, 15:18] ** 2) + T.mean(bp[:, 24:27] ** 2)
+            )
+
             if has_prev:
                 loss = loss + tw * (
                     T.mean((bp - p_bp) ** 2)
