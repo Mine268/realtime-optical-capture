@@ -120,6 +120,8 @@ overlay_videos/
 reprojection_videos/
   <serial>_3d_reprojection_overlay_points_3d.mp4
   combined_3d_reprojection_overlay_points_3d.mp4
+  <serial>_smplx_reprojection_overlay.mp4        # --retarget
+  combined_smplx_reprojection_overlay.mp4        # --retarget
 pose_videos/
   mocap_3d_pose.mp4
 logs/mocap.log
@@ -136,6 +138,60 @@ logs/mocap.log
 - `points_3d`, `points_3d_raw`
 - `reprojection_error`
 - `landmark_names`
+
+## SMPL-X Retarget
+
+`realtime` 和 `capture_estimate` 可以加 `--retarget`：
+
+- `realtime`：每一帧完成 3D 三角化和 causal 后处理后，立刻进行 SMPL-X retarget。session 结束时只汇总保存已经逐帧产生的 SMPL-X 参数。
+- `capture_estimate`：先处理完整视频，完成所有帧的 3D 姿态估计和离线后处理后，再对完整序列进行 retarget。
+
+Retarget 需要 SMPL-X 依赖和模型文件。默认读取 `models/smplx`；也可以用 `--retarget-model-dir models` 指向包含 `smplx/` 子目录的父目录。只有启用 `--retarget-use-vposer` 时才需要 `--retarget-vposer-dir`。
+
+```bash
+roc mocap \
+  --mode capture_estimate \
+  --prepare-session sessions/prepare_20260525_162846 \
+  --calib-session sessions/calib_20260525_163831 \
+  --mocap-session sessions/mocap_test \
+  --frames 200 \
+  --retarget \
+  --retarget-model-dir models/smplx
+```
+
+输出仍在同一个 mocap session 内：
+
+```text
+sessions/mocap_test/
+  smplx_retarget/
+    smplx_fit_sequence.npz
+    retarget_report.yaml
+    trajectory_names.json
+    per_frame/frame_000000.npz
+    per_frame/frame_000000.pkl
+```
+
+`smplx_fit_sequence.npz` 包含 `global_orient`、`body_pose`、`left_hand_pose`、`right_hand_pose`、`transl`、`betas`、`smplx_joints` 和误差指标。默认只优化全身，手部 pose 保持零值；需要手部时再显式加 `--retarget-hands`。`capture` 模式没有 3D keypoints，因此不支持 `--retarget`。
+
+启用 `--retarget` 时，reprojection 阶段还会把 SMPL-X skeleton 投影回原相机视频，额外生成：
+
+```text
+reprojection_videos/<serial>_smplx_reprojection_overlay.mp4
+reprojection_videos/combined_smplx_reprojection_overlay.mp4
+```
+
+常用 retarget 参数：
+
+```bash
+--retarget-device cuda          # 使用 CUDA；不可用时会回退到 CPU
+--retarget-max-frames 200       # 限制 retarget 帧数，-1 表示全部
+--retarget-frame-step 2         # 每隔 N 帧 retarget 一帧
+--retarget-input-scale 0.001    # ROC 3D 点默认从毫米转成米
+--retarget-pose-steps 120       # 每帧姿态优化步数
+--retarget-betas-steps 80       # 共享体型优化步数
+--retarget-hands                # 同时优化 SMPL-X 手部 pose
+--retarget-save-debug-assets    # 额外保存 obj/png 调试文件
+```
 
 ## 常用参数
 

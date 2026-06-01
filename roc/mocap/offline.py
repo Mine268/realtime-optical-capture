@@ -15,7 +15,8 @@ from roc.mocap.common import save_mocap_outputs
 from roc.mocap.logging_utils import tee_to_log
 from roc.mocap.render_2d_overlays import render_all_overlays
 from roc.mocap.render_npz import render_npz_to_video
-from roc.mocap.render_reprojection_overlays import render_reprojection_overlays
+from roc.mocap.render_reprojection_overlays import render_reprojection_overlays, render_smplx_reprojection_overlays
+from roc.mocap.retarget import RetargetConfig, run_mocap_retarget
 from roc.tracking.mediapipe_tracker import MediapipeTracker
 from roc.tracking.model_paths import hand_model_path, pose_model_path_for_complexity
 from roc.triangulation.cameras import camera_group_names, camera_order_indices, load_camera_group_from_toml
@@ -33,6 +34,7 @@ def run_mocap_offline(
     show_preview: bool,
     postprocess_mode: str = "offline",
     delegate: str = "cpu",
+    retarget_config: RetargetConfig | None = None,
 ) -> None:
     prepare_session = prepare_session.resolve()
     calib_session = calib_session.resolve()
@@ -166,6 +168,7 @@ def run_mocap_offline(
                                     source_fps,
                                     postprocess_mode,
                                     calibration_toml_path,
+                                    retarget_config,
                                 )
 
                             tracker = trackers[serial]
@@ -242,6 +245,7 @@ def run_mocap_offline(
                 source_fps,
                 postprocess_mode,
                 calibration_toml_path,
+                retarget_config,
             )
         except Exception:
             traceback.print_exc()
@@ -267,6 +271,7 @@ def _finalize(
     source_fps,
     postprocess_mode,
     calibration_toml_path,
+    retarget_config: RetargetConfig | None,
 ) -> None:
     if not timestamps:
         raise RuntimeError("No mocap frames were processed")
@@ -313,6 +318,15 @@ def _finalize(
         model_complexity=model_complexity,
         postprocess_mode=postprocess_mode,
     )
+    retarget_npz = None
+    if retarget_config is not None:
+        print("Retargeting 3D keypoints to SMPL-X joint rotations...")
+        retarget_npz = run_mocap_retarget(
+            npz_path=session_paths.mocap_npz_path,
+            mocap_session=session_paths.session_dir,
+            config=retarget_config,
+        )
+        print(f"Saved SMPL-X retarget sequence to: {retarget_npz}")
     render_all_overlays(
         npz_path=session_paths.mocap_npz_path,
         video_dir=source_video_dir,
@@ -329,6 +343,16 @@ def _finalize(
         confidence_threshold=0.1,
         frame_limit=0,
     )
+    if retarget_npz is not None:
+        render_smplx_reprojection_overlays(
+            mocap_npz_path=session_paths.mocap_npz_path,
+            smplx_npz_path=retarget_npz,
+            calibration_toml=calibration_toml_path,
+            video_dir=source_video_dir,
+            output_dir=session_paths.session_dir / "reprojection_videos",
+            confidence_threshold=0.1,
+            frame_limit=0,
+        )
     render_npz_to_video(
         npz_path=session_paths.mocap_npz_path,
         output_path=session_paths.session_dir / "pose_videos" / "mocap_3d_pose.mp4",

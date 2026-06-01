@@ -177,6 +177,73 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Use recorded files as an MVS-like camera source for realtime/capture testing",
     )
+    mocap_parser.add_argument(
+        "--retarget",
+        action="store_true",
+        help="After 3D keypoints are saved, retarget them to SMPL-X joint rotations",
+    )
+    mocap_parser.add_argument(
+        "--retarget-model-dir",
+        type=Path,
+        default=Path("models/smplx"),
+        help="SMPL-X model directory used by --retarget",
+    )
+    mocap_parser.add_argument(
+        "--retarget-vposer-dir",
+        type=Path,
+        help="Optional VPoser directory used when --retarget-use-vposer is enabled",
+    )
+    mocap_parser.add_argument(
+        "--retarget-device",
+        default="cpu",
+        choices=["cpu", "cuda"],
+        help="Torch device for --retarget",
+    )
+    mocap_parser.add_argument(
+        "--retarget-max-frames",
+        type=int,
+        default=-1,
+        help="Maximum number of frames to retarget, -1 means all saved 3D frames",
+    )
+    mocap_parser.add_argument(
+        "--retarget-frame-step",
+        type=int,
+        default=1,
+        help="Retarget every Nth saved 3D frame",
+    )
+    mocap_parser.add_argument(
+        "--retarget-input-scale",
+        type=float,
+        default=0.001,
+        help="Scale applied to mocap points before SMPL-X fitting; ROC calibration is millimeters, SMPL-X uses meters",
+    )
+    mocap_parser.add_argument(
+        "--retarget-betas-steps",
+        type=int,
+        default=80,
+        help="SMPL-X shared shape optimization steps for --retarget",
+    )
+    mocap_parser.add_argument(
+        "--retarget-pose-steps",
+        type=int,
+        default=120,
+        help="Per-frame SMPL-X pose optimization steps for --retarget",
+    )
+    mocap_parser.add_argument(
+        "--retarget-use-vposer",
+        action="store_true",
+        help="Use VPoser body pose prior during --retarget",
+    )
+    mocap_parser.add_argument(
+        "--retarget-hands",
+        action="store_true",
+        help="Also optimize SMPL-X hand pose during --retarget; by default only the body is optimized",
+    )
+    mocap_parser.add_argument(
+        "--retarget-save-debug-assets",
+        action="store_true",
+        help="Save per-frame SMPL-X obj/png debug assets during --retarget",
+    )
 
     return parser
 
@@ -225,6 +292,28 @@ def main() -> None:
         return
 
     if args.command == "mocap":
+        retarget_config = None
+        if args.retarget:
+            if args.mode == "capture":
+                parser.error("--retarget requires 3D keypoints and is only supported for realtime or capture_estimate")
+            if args.retarget_frame_step < 1:
+                parser.error("--retarget-frame-step must be >= 1")
+            from roc.mocap.retarget import RetargetConfig
+
+            retarget_config = RetargetConfig(
+                model_dir=args.retarget_model_dir,
+                vposer_dir=args.retarget_vposer_dir,
+                device=args.retarget_device,
+                betas_steps=args.retarget_betas_steps,
+                pose_steps=args.retarget_pose_steps,
+                frame_step=args.retarget_frame_step,
+                max_frames=args.retarget_max_frames,
+                input_scale=args.retarget_input_scale,
+                optimize_hands=args.retarget_hands,
+                use_vposer=args.retarget_use_vposer,
+                save_debug_assets=args.retarget_save_debug_assets,
+            )
+
         if args.mode == "realtime":
             from roc.mocap.realtime import run_mocap_realtime
 
@@ -239,6 +328,7 @@ def main() -> None:
                 show_preview=args.show_preview,
                 delegate=args.delegate,
                 offline_source_dir=args.offline_source_dir,
+                retarget_config=retarget_config,
             )
             return
 
@@ -256,6 +346,7 @@ def main() -> None:
                 show_preview=args.show_preview,
                 postprocess_mode=args.postprocess_mode,
                 delegate=args.delegate,
+                retarget_config=retarget_config,
             )
             return
 

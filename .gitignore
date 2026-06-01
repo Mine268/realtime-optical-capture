@@ -4,3 +4,5 @@
 *.egg-info/
 sessions/
 /MvSdkLog/
+models/smplx/
+models/vposer_v1_0/

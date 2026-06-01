@@ -14,9 +14,11 @@ from roc.config.yaml_io import load_capture_config, save_capture_config, save_mo
 from roc.io.sessions import get_existing_mocap_session
 from roc.mocap.common import build_temp_video_writer, finalize_videos_with_actual_fps, save_mocap_outputs
 from roc.mocap.logging_utils import tee_to_log
+from roc.mocap.postprocess import RealtimePostprocessor
 from roc.mocap.render_2d_overlays import render_all_overlays
 from roc.mocap.render_npz import render_npz_to_video
-from roc.mocap.render_reprojection_overlays import render_reprojection_overlays
+from roc.mocap.render_reprojection_overlays import render_reprojection_overlays, render_smplx_reprojection_overlays
+from roc.mocap.retarget import RealtimeSmplxRetargeter, RetargetConfig
 from roc.mvs import MvsSystem, OfflineMvsSystem
 from roc.tracking.mediapipe_tracker import MediapipeTracker
 from roc.tracking.model_paths import hand_model_path, pose_model_path_for_complexity
@@ -35,6 +37,7 @@ def run_mocap_realtime(
     show_preview: bool,
     delegate: str = "cpu",
     offline_source_dir: Path | None = None,
+    retarget_config: RetargetConfig | None = None,
 ) -> None:
     prepare_session = prepare_session.resolve()
     calib_session = calib_session.resolve()
@@ -111,6 +114,17 @@ def run_mocap_realtime(
                 if missing:
                     raise RuntimeError(f"Cameras from prepare session not currently available: {missing}")
                 print(f"Using cameras: {ordered_serials}")
+                reorder_indices = camera_order_indices(ordered_serials, calibrated_serials)
+                realtime_postprocessor = (
+                    RealtimePostprocessor(num_landmarks=75, fps=fps, cutoff_hz=1.2, max_hold_frames=3)
+                    if retarget_config is not None
+                    else None
+                )
+                realtime_retargeter = (
+                    RealtimeSmplxRetargeter(retarget_config, session_paths.session_dir / "smplx_retarget")
+                    if retarget_config is not None
+                    else None
+                )
                 trackers = {
                     serial: stack.enter_context(
                         MediapipeTracker(
@@ -212,6 +226,23 @@ def run_mocap_realtime(
                         bboxes.append(np.stack(frame_set_bbox, axis=0))
                         frame_timestamps_ns.append(frame_set_timestamp_ns)
 
+                        if realtime_postprocessor is not None and realtime_retargeter is not None:
+                            frame_pose_np = np.stack(frame_set_pose, axis=0).astype(np.float32)[reorder_indices]
+                            frame_pose_conf_np = np.stack(frame_set_pose_conf, axis=0).astype(np.float32)[reorder_indices]
+                            frame_left_np = np.stack(frame_set_left, axis=0).astype(np.float32)[reorder_indices]
+                            frame_left_conf_np = np.stack(frame_set_left_conf, axis=0).astype(np.float32)[reorder_indices]
+                            frame_right_np = np.stack(frame_set_right, axis=0).astype(np.float32)[reorder_indices]
+                            frame_right_conf_np = np.stack(frame_set_right_conf, axis=0).astype(np.float32)[reorder_indices]
+                            frame_landmarks_2d = np.concatenate([frame_pose_np, frame_left_np, frame_right_np], axis=1)
+                            frame_conf = np.concatenate(
+                                [frame_pose_conf_np, frame_left_conf_np, frame_right_conf_np],
+                                axis=1,
+                            )
+                            frame_landmarks_2d = np.where(frame_conf[..., None] <= 0.1, np.nan, frame_landmarks_2d)
+                            frame_points_3d, _ = triangulate_sequence(camera_group, frame_landmarks_2d[:, None, :, :])
+                            processed_points_3d = realtime_postprocessor.update(frame_points_3d[0])
+                            realtime_retargeter.update(frame_index, processed_points_3d)
+
                         if frame_index % 25 == 0:
                             print(f"Processed frame set {frame_index}")
 
@@ -249,7 +280,6 @@ def run_mocap_realtime(
             right_hand_conf_np = np.stack(right_hand_conf, axis=1).astype(np.float32)
             bboxes_np = np.stack(bboxes, axis=1).astype(np.float32)
 
-            reorder_indices = camera_order_indices(ordered_serials, calibrated_serials)
             pose_2d_np = pose_2d_np[reorder_indices]
             pose_conf_np = pose_conf_np[reorder_indices]
             left_hand_2d_np = left_hand_2d_np[reorder_indices]
@@ -282,6 +312,10 @@ def run_mocap_realtime(
                 model_complexity=model_complexity,
                 postprocess_mode="realtime",
             )
+            retarget_npz = None
+            if retarget_config is not None and realtime_retargeter is not None:
+                retarget_npz = realtime_retargeter.save(source_npz=session_paths.mocap_npz_path)
+                print(f"Saved SMPL-X retarget sequence to: {retarget_npz}")
             render_all_overlays(
                 npz_path=session_paths.mocap_npz_path,
                 video_dir=session_paths.videos_dir,
@@ -298,6 +332,16 @@ def run_mocap_realtime(
                 confidence_threshold=0.1,
                 frame_limit=0,
             )
+            if retarget_npz is not None:
+                render_smplx_reprojection_overlays(
+                    mocap_npz_path=session_paths.mocap_npz_path,
+                    smplx_npz_path=retarget_npz,
+                    calibration_toml=calibration_toml_path,
+                    video_dir=session_paths.videos_dir,
+                    output_dir=session_paths.session_dir / "reprojection_videos",
+                    confidence_threshold=0.1,
+                    frame_limit=0,
+                )
             render_npz_to_video(
                 npz_path=session_paths.mocap_npz_path,
                 output_path=session_paths.session_dir / "pose_videos" / "mocap_3d_pose.mp4",
