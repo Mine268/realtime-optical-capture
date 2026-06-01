@@ -209,7 +209,9 @@ class RealtimeSmplxTracker:
         _axis_weights = self._axis_weights
 
         # Adam with joint-specific priors. Knees stay loose so squats can bend.
-        n_steps = 55 if not has_prev else 18
+        steady_steps = max(1, int(self.config.track_pose_steps))
+        recovery_steps = max(steady_steps, int(self.config.track_recovery_pose_steps))
+        n_steps = recovery_steps if not has_prev else steady_steps
         adapter_elapsed = time.perf_counter() - start
 
         optimizer = T.optim.Adam([
@@ -226,6 +228,7 @@ class RealtimeSmplxTracker:
             out = _model(
                 betas=_betas, body_pose=bp, global_orient=go, transl=tr,
                 left_hand_pose=zh, right_hand_pose=zh,
+                return_verts=False,
             )
             pred_pts = out.joints[0, _src]
             diffs = pred_pts[_valid] - _tgt[_valid]
@@ -291,6 +294,7 @@ class RealtimeSmplxTracker:
             out = _model(
                 betas=_betas, body_pose=bp, global_orient=go, transl=tr,
                 left_hand_pose=zh, right_hand_pose=zh,
+                return_verts=False,
             )
             joints = out.joints.cpu().numpy().copy()
             pred_pts = out.joints[0, _src]
@@ -379,6 +383,7 @@ class RealtimeSmplxTracker:
                     transl=tr,
                     left_hand_pose=zh,
                     right_hand_pose=zh,
+                    return_verts=False,
                 )
                 item["smplx_joints"] = out.joints.cpu().numpy().copy()
 

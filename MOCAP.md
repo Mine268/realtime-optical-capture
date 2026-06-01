@@ -153,6 +153,47 @@ Retarget 需要 SMPL-X 依赖和模型文件。默认读取 `models/smplx`；也
 - `fit`：默认高质量 fitting，逐帧调用参考 fitter，支持 lower-body refine 和可选 hand fitting，适合离线质量基线。
 - `track`：body-only realtime tracker，冻结 betas 和手部 pose，用上一帧 warm start 做轻量 Adam 优化，适合低延迟驱动。当前实现会对膝盖、肘部和髋/肩横轴朝向加入显式约束，并对异常肘/腕三角化做 limb-length gate，避免追踪明显错误的单帧手臂点。
 
+### Fit 与 Track 的使用场景
+
+`fit` 适合做质量基线、离线重建、算法对比、疑难帧诊断，以及后续 track 初始化/恢复策略的参考。它的输出更贴近 3D keypoints，但速度很慢；在 RTX 2080 Ti 上，当前 20 帧墙钟测试约 `0.61 FPS`。需要最高质量或需要检查 track 是否跑偏时，使用 `fit`。
+
+```bash
+roc mocap \
+  --mode realtime \
+  --prepare-session sessions/prepare_20260525_162846 \
+  --calib-session sessions/calib_20260525_163831 \
+  --mocap-session sessions/mocap_test \
+  --frames 200 \
+  --offline-source-dir sessions/mocap_test/videos \
+  --inference-device gpu \
+  --model-complexity 2 \
+  --no-hands \
+  --retarget \
+  --retarget-mode fit \
+  --retarget-model-dir models/smplx \
+  --profile
+```
+
+`track` 适合 body-only realtime SMPL-X tracking 和角色驱动。它牺牲少量拟合精度换取低延迟，当前建议使用 `--retarget-pose-steps 18`；6 steps 虽然接近 10 FPS，但抖动明显，不适合驱动。需要实时处理、后续驱动或快速预览时，使用 `track`。
+
+```bash
+roc mocap \
+  --mode realtime \
+  --prepare-session sessions/prepare_20260525_162846 \
+  --calib-session sessions/calib_20260525_163831 \
+  --mocap-session sessions/mocap_test \
+  --frames 200 \
+  --offline-source-dir sessions/mocap_test/videos \
+  --inference-device gpu \
+  --model-complexity 2 \
+  --no-hands \
+  --retarget \
+  --retarget-mode track \
+  --retarget-model-dir models/smplx \
+  --retarget-pose-steps 18 \
+  --profile
+```
+
 ```bash
 roc mocap \
   --mode capture_estimate \
@@ -210,11 +251,26 @@ reprojection_videos/combined_smplx_reprojection_overlay.mp4
 --retarget-save-debug-assets    # 额外保存 obj/png 调试文件
 ```
 
-`track` 模式当前使用固定内部参数，优先服务 realtime body-only 驱动；`--retarget-pose-steps`、`--retarget-lower-steps`、`--retarget-hands` 等 fit 参数不会改变 track 的核心优化预算。需要对比质量时，同一段数据建议分别跑 `--retarget-mode fit` 和 `--retarget-mode track`，并比较 `smplx_retarget/smplx_fit_sequence.npz`、SMPL-X reprojection overlay、膝/肘夹角和 wrist acceleration。
+`track` 模式优先服务 realtime body-only 驱动。`--retarget-pose-steps` 会控制稳定帧的 track Adam 步数，当前上限为 20；第一帧和 recovery 帧会自动使用更高步数。实测 6 steps 能接近 10 FPS，但 SMPL-X pose 抖动明显，不适合驱动；18 steps 是当前可用质量下限。需要对比质量时，同一段数据建议分别跑 `--retarget-mode fit` 和 `--retarget-mode track`，并比较 `smplx_retarget/smplx_fit_sequence.npz`、SMPL-X reprojection overlay、膝/肘夹角和 wrist acceleration。
 
 当前 `sessions/mocap_test` 200 帧验证结果（RTX 2080 Ti，fake MVS，body-only track）：
 
 ```text
+track 18-step realtime profile from sessions/mocap_test/logs/mocap.log:
+  all 200 frames including first-frame initialization: 208.1 ms/frame, 4.80 FPS
+  steady frames 1-199: loop 199.9 ms/frame, 5.00 FPS
+  steady estimate_only mean/p50/p95: 53.6 / 52.8 / 59.9 ms
+  steady smplx_retarget mean/p50/p95: 146.3 / 144.1 / 167.1 ms
+  track body_err mean/p50/p95: 0.048 / 0.047 / 0.062 m
+
+track 6-step realtime profile:
+  loop about 95-108 ms/frame, near 9-10 FPS, but visible jitter makes it unusable for driving
+
+fit mode wall-clock baseline, first 20 frames:
+  1629.8 ms/frame, 0.61 FPS
+  previous 50-frame fit report mean_body_error: 0.0416 m
+  track 18-step 200-frame report mean_body_error: 0.0481 m
+
 track mapped 3D error mean/p90/max: 0.0616 / 0.0730 / 0.1898 m
 fit   mapped 3D error mean/p90/max: 0.0517 / 0.0658 / 0.1926 m
 track-vs-fit body joint mean/p90/max: 0.0722 / 0.0913 / 0.1544 m
@@ -222,7 +278,7 @@ frame 96 knee angle target/track/fit: L 40.4/45.0/39.8 deg, R 39.8/46.1/37.4 deg
 frame 96 elbow angle target/track/fit: L 116.8/114.4/119.3 deg, R 112.1/112.3/112.8 deg
 track wrist current-frame error mean/p90: L 0.0906/0.1400 m, R 0.0806/0.1297 m
 track hip-yaw error on frames 60-115 mean/p90/max: 9.7 / 21.6 / 28.5 deg
-track throughput: about 5.8 FPS for retarget-only on the test machine
+track retarget-only throughput: about 5.8 FPS on the earlier 200-frame benchmark
 ```
 
 `realtime` 默认也会使用高质量 fitting 参数，因此启用 `--retarget` 后会明显变慢。排查耗时时使用统一的 mocap profile：

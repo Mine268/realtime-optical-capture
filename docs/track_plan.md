@@ -12,7 +12,7 @@ Recent realtime fake-MVS profiling shows the bottleneck is SMPL-X fitting:
 - SMPL-X retarget: about 1.3 s/frame.
 - Retarget bottleneck: `pose_optimize` about 1.1 s/frame, `lower_body_refine` about 0.17 s/frame.
 
-Reducing `pose_steps` alone improves speed but makes SMPL-X rotations too jittery for driving because the current path is still frame-by-frame fitting with weak temporal constraints.
+Reducing `pose_steps` alone improves speed but makes SMPL-X rotations too jittery for driving. Current track tests show that 6 steady Adam steps can approach 9-10 FPS, but the output is visibly unstable. The practical quality floor is 18 steady steps, which is usable but still below the target framerate.
 
 ## Target Architecture
 
@@ -36,15 +36,22 @@ Tracking mode should:
 
 The first body-only `track` implementation is in place. It uses `RealtimeSmplxTracker` with warm-started Adam optimization, weighted body joint fitting, explicit knee and elbow angle losses, hip/shoulder horizontal-axis alignment, light elbow/wrist target smoothing, and limb-length gating for obvious arm outliers. It saves the same `smplx_fit_sequence.npz` schema as fit mode and recomputes `smplx_joints` after save-time smoothing.
 
+Use `fit` for offline quality baseline, algorithm comparison, suspicious-frame diagnosis, and future tracker initialization/recovery references. Use `track` for body-only realtime tracking, character driving, and quick preview. The current usable track command should set `--retarget-mode track --retarget-pose-steps 18`; lower budgets can be profiled, but 6 steps is currently too jittery for driving.
+
 Latest `sessions/mocap_test` 200-frame validation:
 
+- Track 18-step realtime profile from `sessions/mocap_test/logs/mocap.log`: all 200 frames including first-frame initialization `208.1 ms/frame` (`4.80 FPS`); steady frames 1-199 `199.9 ms/frame` (`5.00 FPS`).
+- Track 18-step stage timing, steady frames 1-199: `estimate_only` mean/p50/p95 `53.6 / 52.8 / 59.9 ms`; `smplx_retarget` mean/p50/p95 `146.3 / 144.1 / 167.1 ms`; log `body_err` mean/p50/p95 `0.048 / 0.047 / 0.062 m`.
+- Track 6-step realtime profile: loop about `95-108 ms/frame`, near `9-10 FPS`, but visibly too jittery for driving.
+- Fit mode wall-clock baseline, first 20 frames: `1629.8 ms/frame`, `0.61 FPS`.
+- Fit quality remains better: previous 50-frame fit report mean body error `0.0416 m`; current 18-step track report mean body error `0.0481 m`.
 - Track mapped 3D error mean/p90/max: `0.0616 / 0.0730 / 0.1898 m`.
 - Fit mapped 3D error mean/p90/max: `0.0517 / 0.0658 / 0.1926 m`.
 - Track-vs-fit body joint mean/p90/max: `0.0722 / 0.0913 / 0.1544 m`.
 - Frame 96 knee angle target/track/fit: left `40.4/45.0/39.8 deg`, right `39.8/46.1/37.4 deg`.
 - Frame 96 elbow angle target/track/fit: left `116.8/114.4/119.3 deg`, right `112.1/112.3/112.8 deg`.
 - Frames 60-115 hip-yaw error mean/p90/max: `9.7 / 21.6 / 28.5 deg`.
-- Retarget-only throughput is about `5.8 FPS` on the RTX 2080 Ti test machine, so the 10 FPS target is not met yet.
+- Earlier retarget-only throughput was about `5.8 FPS` on the RTX 2080 Ti test machine, so the 10 FPS target is not met yet at usable quality.
 
 ## Implementation Phases
 

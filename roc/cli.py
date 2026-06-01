@@ -156,6 +156,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show live mocap preview",
     )
     mocap_parser.add_argument(
+        "--no-record-videos",
+        action="store_true",
+        help="Skip realtime video recording and end-of-session overlay rendering; useful for latency profiling",
+    )
+    mocap_parser.add_argument(
         "--video-dir",
         type=Path,
         help="Optional directory containing per-camera mp4 files for capture_estimate mode; defaults to <mocap-session>/videos/",
@@ -416,10 +421,17 @@ def main() -> None:
             if args.retarget_realtime_root_translation_threshold <= 0.0:
                 parser.error("--retarget-realtime-root-translation-threshold must be > 0")
             from roc.mocap.retarget import RetargetConfig, RetargetMode
+            retarget_mode = RetargetMode(args.retarget_mode)
+            track_pose_steps = min(args.retarget_pose_steps, 20) if retarget_mode == RetargetMode.TRACK else 20
+            track_recovery_pose_steps = (
+                max(track_pose_steps, min(60, max(8, track_pose_steps * 4)))
+                if retarget_mode == RetargetMode.TRACK
+                else 60
+            )
 
             retarget_config = RetargetConfig(
                 model_dir=args.retarget_model_dir,
-                mode=RetargetMode(args.retarget_mode),
+                mode=retarget_mode,
                 vposer_dir=args.retarget_vposer_dir,
                 device=retarget_device,
                 betas_steps=args.retarget_betas_steps,
@@ -445,6 +457,11 @@ def main() -> None:
                 save_debug_assets=args.retarget_save_debug_assets,
                 profile=args.profile,
                 profile_interval=1,
+                track_pose_steps=track_pose_steps,
+                track_temporal_weight=args.retarget_temporal_weight,
+                track_velocity_weight=args.retarget_velocity_weight,
+                track_acceleration_weight=args.retarget_acceleration_weight,
+                track_recovery_pose_steps=track_recovery_pose_steps,
             )
 
         if args.mode == "realtime":
@@ -462,6 +479,7 @@ def main() -> None:
                 delegate=mediapipe_delegate,
                 offline_source_dir=args.offline_source_dir,
                 retarget_config=retarget_config,
+                record_videos=not args.no_record_videos,
                 profile=args.profile,
             )
             return

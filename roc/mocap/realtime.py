@@ -58,6 +58,7 @@ def run_mocap_realtime(
     delegate: str = "cpu",
     offline_source_dir: Path | None = None,
     retarget_config: RetargetConfig | None = None,
+    record_videos: bool = True,
     profile: bool = False,
 ) -> None:
     prepare_session = prepare_session.resolve()
@@ -121,7 +122,7 @@ def run_mocap_realtime(
             right_hand_2d = []
             right_hand_conf = []
             bboxes = []
-            record_videos = (
+            record_session_videos = record_videos and (
                 offline_source_dir is None
                 or offline_source_dir.resolve() != session_paths.videos_dir.resolve()
             )
@@ -216,7 +217,7 @@ def run_mocap_realtime(
                             if frame is None:
                                 raise RuntimeError(f"No frame received for camera {serial}")
 
-                            if record_videos and serial not in writers:
+                            if record_session_videos and serial not in writers:
                                 temp_path = session_paths.videos_dir / f"{serial}.capture_tmp.avi"
                                 temp_video_paths[serial] = temp_path
                                 writers[serial] = build_temp_video_writer(
@@ -225,7 +226,7 @@ def run_mocap_realtime(
                                     frame.shape[0],
                                     fps,
                                 )
-                            if record_videos:
+                            if record_session_videos:
                                 stage_start = time.perf_counter()
                                 writers[serial].write(frame)
                                 profile_times["video_write_s"] += time.perf_counter() - stage_start
@@ -321,13 +322,17 @@ def run_mocap_realtime(
                     for _, camera in reversed(cameras):
                         camera.close()
 
-            actual_fps = finalize_videos_with_actual_fps(
-                temp_video_paths=temp_video_paths,
-                final_video_dir=session_paths.videos_dir,
-                timestamps_ns=frame_timestamps_ns,
-                fallback_fps=fps,
-            )
-            print(f"Finalized realtime mocap videos with actual fps={actual_fps:.3f}")
+            if record_session_videos:
+                actual_fps = finalize_videos_with_actual_fps(
+                    temp_video_paths=temp_video_paths,
+                    final_video_dir=session_paths.videos_dir,
+                    timestamps_ns=frame_timestamps_ns,
+                    fallback_fps=fps,
+                )
+                print(f"Finalized realtime mocap videos with actual fps={actual_fps:.3f}")
+            else:
+                actual_fps = fps
+                print("Skipped realtime mocap video recording")
 
             pose_2d_np = np.stack(pose_2d, axis=1).astype(np.float32)
             pose_conf_np = np.stack(pose_conf, axis=1).astype(np.float32)
@@ -373,38 +378,39 @@ def run_mocap_realtime(
             if retarget_config is not None and realtime_retargeter is not None:
                 retarget_npz = realtime_retargeter.save(source_npz=session_paths.mocap_npz_path)
                 print(f"Saved SMPL-X retarget sequence to: {retarget_npz}")
-            render_all_overlays(
-                npz_path=session_paths.mocap_npz_path,
-                video_dir=session_paths.videos_dir,
-                output_dir=session_paths.overlay_videos_dir,
-                confidence_threshold=0.1,
-                frame_limit=0,
-            )
-            render_reprojection_overlays(
-                npz_path=session_paths.mocap_npz_path,
-                calibration_toml=calibration_toml_path,
-                video_dir=session_paths.videos_dir,
-                output_dir=session_paths.session_dir / "reprojection_videos",
-                points_key="points_3d",
-                confidence_threshold=0.1,
-                frame_limit=0,
-            )
-            if retarget_npz is not None:
-                render_smplx_reprojection_overlays(
-                    mocap_npz_path=session_paths.mocap_npz_path,
-                    smplx_npz_path=retarget_npz,
-                    calibration_toml=calibration_toml_path,
+            if record_videos:
+                render_all_overlays(
+                    npz_path=session_paths.mocap_npz_path,
                     video_dir=session_paths.videos_dir,
-                    output_dir=session_paths.session_dir / "reprojection_videos",
+                    output_dir=session_paths.overlay_videos_dir,
                     confidence_threshold=0.1,
                     frame_limit=0,
                 )
-            render_npz_to_video(
-                npz_path=session_paths.mocap_npz_path,
-                output_path=session_paths.session_dir / "pose_videos" / "mocap_3d_pose.mp4",
-                fps=actual_fps,
-                frame_limit=0,
-            )
+                render_reprojection_overlays(
+                    npz_path=session_paths.mocap_npz_path,
+                    calibration_toml=calibration_toml_path,
+                    video_dir=session_paths.videos_dir,
+                    output_dir=session_paths.session_dir / "reprojection_videos",
+                    points_key="points_3d",
+                    confidence_threshold=0.1,
+                    frame_limit=0,
+                )
+                if retarget_npz is not None:
+                    render_smplx_reprojection_overlays(
+                        mocap_npz_path=session_paths.mocap_npz_path,
+                        smplx_npz_path=retarget_npz,
+                        calibration_toml=calibration_toml_path,
+                        video_dir=session_paths.videos_dir,
+                        output_dir=session_paths.session_dir / "reprojection_videos",
+                        confidence_threshold=0.1,
+                        frame_limit=0,
+                    )
+                render_npz_to_video(
+                    npz_path=session_paths.mocap_npz_path,
+                    output_path=session_paths.session_dir / "pose_videos" / "mocap_3d_pose.mp4",
+                    fps=actual_fps,
+                    frame_limit=0,
+                )
             print(f"Saved mocap session to: {session_paths.session_dir}")
         except Exception:
             traceback.print_exc()
