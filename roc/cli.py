@@ -167,15 +167,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Postprocess mode for capture_estimate: offline uses zero-phase batch filtering, realtime uses causal online filtering",
     )
     mocap_parser.add_argument(
-        "--delegate",
+        "--inference-device",
         default="cpu",
-        choices=["cpu", "gpu"],
-        help="MediaPipe inference delegate",
+        choices=["cpu", "gpu", "cuda"],
+        help="Inference device for MediaPipe and SMPL-X retarget; gpu/cuda uses MediaPipe GPU and Torch CUDA",
     )
     mocap_parser.add_argument(
         "--offline-source-dir",
         type=Path,
         help="Use recorded files as an MVS-like camera source for realtime/capture testing",
+    )
+    mocap_parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Print per-frame mocap estimate and retarget timings to stdout and the mocap log",
     )
     mocap_parser.add_argument(
         "--retarget",
@@ -192,12 +197,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--retarget-vposer-dir",
         type=Path,
         help="Optional VPoser directory used when --retarget-use-vposer is enabled",
-    )
-    mocap_parser.add_argument(
-        "--retarget-device",
-        default="cpu",
-        choices=["cpu", "cuda"],
-        help="Torch device for --retarget",
     )
     mocap_parser.add_argument(
         "--retarget-max-frames",
@@ -230,6 +229,79 @@ def build_parser() -> argparse.ArgumentParser:
         help="Per-frame SMPL-X pose optimization steps for --retarget",
     )
     mocap_parser.add_argument(
+        "--retarget-root-steps",
+        type=int,
+        help="Override per-frame root alignment optimization steps for --retarget",
+    )
+    mocap_parser.add_argument(
+        "--retarget-lower-steps",
+        type=int,
+        help="Override lower-body refinement steps for --retarget",
+    )
+    mocap_parser.add_argument(
+        "--retarget-no-lower-refine",
+        action="store_true",
+        help="Skip the extra lower-body refinement stage during --retarget",
+    )
+    mocap_parser.add_argument(
+        "--retarget-early-stop-check-interval",
+        type=int,
+        default=1,
+        help="Check pose-stage early stopping every N steps; higher values reduce CUDA synchronization",
+    )
+    mocap_parser.add_argument(
+        "--retarget-temporal-weight",
+        type=float,
+        default=0.0,
+        help="Weight for matching realtime retarget pose/root to the previous frame",
+    )
+    mocap_parser.add_argument(
+        "--retarget-velocity-weight",
+        type=float,
+        default=0.0,
+        help="Weight for damping realtime retarget root velocity changes",
+    )
+    mocap_parser.add_argument(
+        "--retarget-acceleration-weight",
+        type=float,
+        default=0.002,
+        help="Weight for damping realtime retarget acceleration changes",
+    )
+    mocap_parser.add_argument(
+        "--retarget-no-adaptive-root",
+        action="store_true",
+        help="Disable realtime adaptive root steps and use --retarget-root-steps behavior for every frame",
+    )
+    mocap_parser.add_argument(
+        "--retarget-realtime-root-steps",
+        type=int,
+        default=2,
+        help="Root alignment steps for stable realtime retarget frames",
+    )
+    mocap_parser.add_argument(
+        "--retarget-realtime-root-recovery-steps",
+        type=int,
+        help="Root alignment steps for realtime init, turn, translation, or high-error recovery frames",
+    )
+    mocap_parser.add_argument(
+        "--retarget-realtime-root-error-threshold",
+        type=float,
+        default=0.12,
+        help="Body mean error in meters above which realtime retarget uses recovery root steps",
+    )
+    mocap_parser.add_argument(
+        "--retarget-realtime-root-turn-threshold",
+        type=float,
+        default=18.0,
+        help="Hip-axis turn angle in degrees above which realtime retarget uses recovery root steps",
+    )
+    mocap_parser.add_argument(
+        "--retarget-realtime-root-translation-threshold",
+        type=float,
+        default=0.20,
+        help="Hip-center translation in meters above which realtime retarget uses recovery root steps",
+    )
+    mocap_parser.add_argument(
         "--retarget-use-vposer",
         action="store_true",
         help="Use VPoser body pose prior during --retarget",
@@ -254,6 +326,14 @@ def _enable_argcomplete(parser: argparse.ArgumentParser) -> None:
     except ImportError:
         return
     argcomplete.autocomplete(parser)
+
+
+def _mediapipe_delegate_from_inference_device(device: str) -> str:
+    return "gpu" if device in {"gpu", "cuda"} else "cpu"
+
+
+def _retarget_device_from_inference_device(device: str) -> str:
+    return "cuda" if device in {"gpu", "cuda"} else "cpu"
 
 
 def main() -> None:
@@ -292,26 +372,72 @@ def main() -> None:
         return
 
     if args.command == "mocap":
+        mediapipe_delegate = _mediapipe_delegate_from_inference_device(args.inference_device)
+        retarget_device = _retarget_device_from_inference_device(args.inference_device)
         retarget_config = None
         if args.retarget:
             if args.mode == "capture":
                 parser.error("--retarget requires 3D keypoints and is only supported for realtime or capture_estimate")
             if args.retarget_frame_step < 1:
                 parser.error("--retarget-frame-step must be >= 1")
+            if args.retarget_pose_steps < 1:
+                parser.error("--retarget-pose-steps must be >= 1")
+            if args.retarget_betas_steps < 1:
+                parser.error("--retarget-betas-steps must be >= 1")
+            if args.retarget_root_steps is not None and args.retarget_root_steps < 1:
+                parser.error("--retarget-root-steps must be >= 1")
+            if args.retarget_lower_steps is not None and args.retarget_lower_steps < 1:
+                parser.error("--retarget-lower-steps must be >= 1")
+            if args.retarget_early_stop_check_interval < 1:
+                parser.error("--retarget-early-stop-check-interval must be >= 1")
+            if args.retarget_temporal_weight < 0.0:
+                parser.error("--retarget-temporal-weight must be >= 0")
+            if args.retarget_velocity_weight < 0.0:
+                parser.error("--retarget-velocity-weight must be >= 0")
+            if args.retarget_acceleration_weight < 0.0:
+                parser.error("--retarget-acceleration-weight must be >= 0")
+            if args.retarget_realtime_root_steps < 1:
+                parser.error("--retarget-realtime-root-steps must be >= 1")
+            if (
+                args.retarget_realtime_root_recovery_steps is not None
+                and args.retarget_realtime_root_recovery_steps < 1
+            ):
+                parser.error("--retarget-realtime-root-recovery-steps must be >= 1")
+            if args.retarget_realtime_root_error_threshold <= 0.0:
+                parser.error("--retarget-realtime-root-error-threshold must be > 0")
+            if args.retarget_realtime_root_turn_threshold <= 0.0:
+                parser.error("--retarget-realtime-root-turn-threshold must be > 0")
+            if args.retarget_realtime_root_translation_threshold <= 0.0:
+                parser.error("--retarget-realtime-root-translation-threshold must be > 0")
             from roc.mocap.retarget import RetargetConfig
 
             retarget_config = RetargetConfig(
                 model_dir=args.retarget_model_dir,
                 vposer_dir=args.retarget_vposer_dir,
-                device=args.retarget_device,
+                device=retarget_device,
                 betas_steps=args.retarget_betas_steps,
                 pose_steps=args.retarget_pose_steps,
+                root_steps=args.retarget_root_steps,
+                lower_steps=args.retarget_lower_steps,
+                lower_body_refine=not args.retarget_no_lower_refine,
+                early_stop_check_interval=args.retarget_early_stop_check_interval,
+                temporal_weight=args.retarget_temporal_weight,
+                velocity_weight=args.retarget_velocity_weight,
+                acceleration_weight=args.retarget_acceleration_weight,
+                realtime_adaptive_root=not args.retarget_no_adaptive_root,
+                realtime_root_steps=args.retarget_realtime_root_steps,
+                realtime_root_recovery_steps=args.retarget_realtime_root_recovery_steps,
+                realtime_root_error_threshold_m=args.retarget_realtime_root_error_threshold,
+                realtime_root_turn_threshold_deg=args.retarget_realtime_root_turn_threshold,
+                realtime_root_translation_threshold_m=args.retarget_realtime_root_translation_threshold,
                 frame_step=args.retarget_frame_step,
                 max_frames=args.retarget_max_frames,
                 input_scale=args.retarget_input_scale,
                 optimize_hands=args.retarget_hands,
                 use_vposer=args.retarget_use_vposer,
                 save_debug_assets=args.retarget_save_debug_assets,
+                profile=args.profile,
+                profile_interval=1,
             )
 
         if args.mode == "realtime":
@@ -326,9 +452,10 @@ def main() -> None:
                 hands_enabled=not args.no_hands,
                 model_complexity=args.model_complexity,
                 show_preview=args.show_preview,
-                delegate=args.delegate,
+                delegate=mediapipe_delegate,
                 offline_source_dir=args.offline_source_dir,
                 retarget_config=retarget_config,
+                profile=args.profile,
             )
             return
 
@@ -345,8 +472,9 @@ def main() -> None:
                 model_complexity=args.model_complexity,
                 show_preview=args.show_preview,
                 postprocess_mode=args.postprocess_mode,
-                delegate=args.delegate,
+                delegate=mediapipe_delegate,
                 retarget_config=retarget_config,
+                profile=args.profile,
             )
             return
 

@@ -4,6 +4,7 @@ from pathlib import Path
 from contextlib import ExitStack
 import traceback
 from datetime import datetime
+import time
 
 import cv2
 import numpy as np
@@ -23,6 +24,18 @@ from roc.triangulation.cameras import camera_group_names, camera_order_indices, 
 from roc.triangulation.triangulate import triangulate_sequence
 
 
+def _format_estimate_profile_line(frame_index: int, timings: dict[str, float]) -> str:
+    fields = (
+        ("estimate_only", timings.get("frame_total_s", 0.0)),
+        ("video_read", timings.get("read_s", 0.0)),
+        ("mediapipe_pose", timings.get("pose_s", 0.0)),
+        ("mediapipe_hands", timings.get("hands_s", 0.0)),
+        ("buffer_append", timings.get("append_s", 0.0)),
+    )
+    parts = [f"{name}={seconds * 1000.0:.1f}ms" for name, seconds in fields]
+    return f"[mocap-profile] frame={frame_index} stage=estimate " + " ".join(parts)
+
+
 def run_mocap_offline(
     prepare_session: Path,
     calib_session: Path,
@@ -35,6 +48,7 @@ def run_mocap_offline(
     postprocess_mode: str = "offline",
     delegate: str = "cpu",
     retarget_config: RetargetConfig | None = None,
+    profile: bool = False,
 ) -> None:
     prepare_session = prepare_session.resolve()
     calib_session = calib_session.resolve()
@@ -134,6 +148,13 @@ def run_mocap_offline(
                     }
                     frame_index = 0
                     while True:
+                        frame_start = time.perf_counter()
+                        profile_times = {
+                            "read_s": 0.0,
+                            "pose_s": 0.0,
+                            "hands_s": 0.0,
+                            "append_s": 0.0,
+                        }
                         frame_set_pose = []
                         frame_set_pose_conf = []
                         frame_set_left = []
@@ -145,7 +166,9 @@ def run_mocap_offline(
                         timestamp_ms = round(frame_index * 1000.0 / max(source_fps, 1.0))
 
                         for serial, cap in caps:
+                            stage_start = time.perf_counter()
                             ret, frame = cap.read()
+                            profile_times["read_s"] += time.perf_counter() - stage_start
                             if not ret:
                                 frame = None
                             if frame is None:
@@ -169,11 +192,16 @@ def run_mocap_offline(
                                     postprocess_mode,
                                     calibration_toml_path,
                                     retarget_config,
+                                    profile,
                                 )
 
                             tracker = trackers[serial]
+                            stage_start = time.perf_counter()
                             pose_result = tracker.detect_pose(frame, timestamp_ms=timestamp_ms)
+                            profile_times["pose_s"] += time.perf_counter() - stage_start
+                            stage_start = time.perf_counter()
                             hand_result = tracker.detect_hands(frame, timestamp_ms=timestamp_ms)
+                            profile_times["hands_s"] += time.perf_counter() - stage_start
                             valid = ~np.isnan(pose_result.xy[:, 0])
                             if np.any(valid):
                                 xy = pose_result.xy[valid]
@@ -198,6 +226,7 @@ def run_mocap_offline(
                                         cv2.circle(overlay, (int(point[0]), int(point[1])), 2, (0, 255, 0), -1)
                                 preview_frames.append(overlay)
 
+                        stage_start = time.perf_counter()
                         timestamps.append(timestamp_ms)
                         pose_2d.append(np.stack(frame_set_pose, axis=0))
                         pose_conf.append(np.stack(frame_set_pose_conf, axis=0))
@@ -206,6 +235,11 @@ def run_mocap_offline(
                         right_hand_2d.append(np.stack(frame_set_right, axis=0))
                         right_hand_conf.append(np.stack(frame_set_right_conf, axis=0))
                         bboxes.append(np.stack(frame_set_bbox, axis=0))
+                        profile_times["append_s"] += time.perf_counter() - stage_start
+
+                        if profile:
+                            profile_times["frame_total_s"] = time.perf_counter() - frame_start
+                            print(_format_estimate_profile_line(frame_index, profile_times), flush=True)
 
                         if frame_index % 25 == 0:
                             print(f"Processed frame set {frame_index}")
@@ -246,6 +280,7 @@ def run_mocap_offline(
                 postprocess_mode,
                 calibration_toml_path,
                 retarget_config,
+                profile,
             )
         except Exception:
             traceback.print_exc()
@@ -272,6 +307,7 @@ def _finalize(
     postprocess_mode,
     calibration_toml_path,
     retarget_config: RetargetConfig | None,
+    profile: bool,
 ) -> None:
     if not timestamps:
         raise RuntimeError("No mocap frames were processed")
@@ -294,10 +330,14 @@ def _finalize(
     right_hand_conf_np = right_hand_conf_np[reorder_indices]
     bboxes_np = bboxes_np[reorder_indices]
 
+    finalize_start = time.perf_counter()
     all_landmarks_2d = np.concatenate([pose_2d_np, left_hand_2d_np, right_hand_2d_np], axis=2)
     all_conf = np.concatenate([pose_conf_np, left_hand_conf_np, right_hand_conf_np], axis=2)
     all_landmarks_2d = np.where(all_conf[..., None] <= 0.1, np.nan, all_landmarks_2d)
+    triangulate_start = time.perf_counter()
     points_3d, reprojection = triangulate_sequence(camera_group, all_landmarks_2d)
+    triangulate_elapsed = time.perf_counter() - triangulate_start
+    save_start = time.perf_counter()
 
     save_mocap_outputs(
         session_paths=session_paths,
@@ -318,6 +358,15 @@ def _finalize(
         model_complexity=model_complexity,
         postprocess_mode=postprocess_mode,
     )
+    save_elapsed = time.perf_counter() - save_start
+    if profile:
+        print(
+            "[mocap-profile] stage=finalize "
+            f"triangulate_3d_all_frames={triangulate_elapsed * 1000.0:.1f}ms "
+            f"save_mocap_outputs={save_elapsed * 1000.0:.1f}ms "
+            f"total={(time.perf_counter() - finalize_start) * 1000.0:.1f}ms",
+            flush=True,
+        )
     retarget_npz = None
     if retarget_config is not None:
         print("Retargeting 3D keypoints to SMPL-X joint rotations...")

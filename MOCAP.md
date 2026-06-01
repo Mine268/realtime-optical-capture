@@ -66,7 +66,7 @@ roc mocap \
   --calib-session sessions/calib_20260525_163831 \
   --mocap-session sessions/mocap_test \
   --frames 200 \
-  --delegate gpu \
+  --inference-device gpu \
   --model-complexity 2
 ```
 
@@ -89,7 +89,7 @@ roc mocap \
   --calib-session sessions/calib_20260525_163831 \
   --mocap-session sessions/mocap_test \
   --frames 200 \
-  --delegate gpu \
+  --inference-device gpu \
   --model-complexity 2
 ```
 
@@ -183,15 +183,49 @@ reprojection_videos/combined_smplx_reprojection_overlay.mp4
 常用 retarget 参数：
 
 ```bash
---retarget-device cuda          # 使用 CUDA；不可用时会回退到 CPU
+--inference-device gpu          # MediaPipe 使用 GPU delegate，retarget 使用 CUDA
 --retarget-max-frames 200       # 限制 retarget 帧数，-1 表示全部
 --retarget-frame-step 2         # 每隔 N 帧 retarget 一帧
 --retarget-input-scale 0.001    # ROC 3D 点默认从毫米转成米
 --retarget-pose-steps 120       # 每帧姿态优化步数
+--retarget-root-steps 30        # 覆盖每帧 root 对齐步数，默认 max(12, pose_steps/4)
+--retarget-lower-steps 20       # 覆盖 lower-body refine 步数，默认 max(6, pose_steps/6)
+--retarget-no-lower-refine      # 跳过额外 lower-body refine，适合低延迟 realtime
+--retarget-early-stop-check-interval 5  # 减少 CUDA loss 同步频率
+--retarget-temporal-weight 1.0          # 约束当前帧贴近上一帧，降低低步数抖动
+--retarget-acceleration-weight 0.02     # 抑制二阶抖动
+--retarget-realtime-root-steps 2         # realtime 稳定帧 root 对齐步数
+--retarget-realtime-root-recovery-steps 12  # 初始化/转身/高误差时 root 对齐步数
+--retarget-no-adaptive-root              # 关闭 realtime 自适应 root 步数
 --retarget-betas-steps 80       # 共享体型优化步数
 --retarget-hands                # 同时优化 SMPL-X 手部 pose
 --retarget-save-debug-assets    # 额外保存 obj/png 调试文件
 ```
+
+`realtime` 默认也会使用高质量 fitting 参数，因此启用 `--retarget` 后会明显变慢。排查耗时时使用统一的 mocap profile：
+
+```bash
+--profile \
+--inference-device gpu
+```
+
+`--profile` 会逐帧打印 `[mocap-profile]`，输出同时进入 `logs/mocap.log`。`stage=estimate` 行中 `mocap_loop_total` 是本帧主循环总耗时，`estimate_only` 是扣除 `smplx_retarget` 后的姿态估计链路耗时；`stage=retarget` 行中 `smplx_total` 是 SMPL-X fitting 总耗时，`pose_optimize` 和 `lower_body_refine` 通常是主要瓶颈。
+
+低延迟测试可先使用较小预算：
+
+```bash
+--profile \
+--inference-device gpu \
+--retarget-pose-steps 60 \
+--retarget-realtime-root-steps 2 \
+--retarget-realtime-root-recovery-steps 8 \
+--retarget-lower-steps 8 \
+--retarget-temporal-weight 1.0 \
+--retarget-acceleration-weight 0.02 \
+--retarget-early-stop-check-interval 5
+```
+
+`realtime` 默认启用自适应 root：第一帧、高误差帧、髋部横轴转角超过阈值的帧、或髋中心位移过大的帧使用 recovery root steps；正常连续帧使用较小的 `--retarget-realtime-root-steps`。不要直接把 `--retarget-pose-steps` 降得过低；低步数需要配合 temporal/acceleration 权重，否则 SMPL-X pose 会跟随单帧 3D 噪声抖动。速度、误差和稳定性需要用 `retarget_report.yaml` 中的误差、`realtime_root_adaptation` 和阶段耗时一起评估。
 
 ## 常用参数
 
@@ -202,8 +236,8 @@ reprojection_videos/combined_smplx_reprojection_overlay.mp4
 --model-complexity 0      # lite pose 模型
 --model-complexity 1      # full pose 模型
 --model-complexity 2      # heavy pose 模型
---delegate cpu            # CPU 推理
---delegate gpu            # GPU delegate
+--inference-device cpu    # MediaPipe 和 retarget 都使用 CPU
+--inference-device gpu    # MediaPipe 使用 GPU delegate，retarget 使用 CUDA
 ```
 
 输入目录参数只在特定模式生效：

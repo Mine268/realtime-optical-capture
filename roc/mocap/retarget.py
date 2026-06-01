@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 import sys
+import time
 import types
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,12 +28,27 @@ class RetargetConfig:
     betas_sample_count: int = 16
     betas_steps: int = 80
     pose_steps: int = 120
+    root_steps: int | None = None
+    lower_steps: int | None = None
+    lower_body_refine: bool = True
+    early_stop_check_interval: int = 1
+    temporal_weight: float = 0.0
+    velocity_weight: float = 0.0
+    acceleration_weight: float = 0.002
+    realtime_adaptive_root: bool = True
+    realtime_root_steps: int = 2
+    realtime_root_recovery_steps: int | None = None
+    realtime_root_error_threshold_m: float = 0.12
+    realtime_root_turn_threshold_deg: float = 18.0
+    realtime_root_translation_threshold_m: float = 0.20
     frame_step: int = 1
     max_frames: int = -1
     input_scale: float = 0.001
     optimize_hands: bool = False
     use_vposer: bool = False
     save_debug_assets: bool = False
+    profile: bool = False
+    profile_interval: int = 25
 
 
 class RealtimeSmplxRetargeter:
@@ -76,9 +92,16 @@ class RealtimeSmplxRetargeter:
         self.aggregate: list[dict[str, np.ndarray]] = []
         self.prev_result: dict[str, np.ndarray] | None = None
         self.prev_prev_result: dict[str, np.ndarray] | None = None
+        self.prev_body_axis: np.ndarray | None = None
+        self.prev_body_center: np.ndarray | None = None
 
     def update(self, frame_index: int, points_3d: np.ndarray) -> dict[str, np.ndarray]:
+        start = time.perf_counter()
         sequence = _sequence_from_points(points_3d[None, :, :], input_scale=self.config.input_scale)
+        body_axis, body_center = _body_root_features(sequence)
+        root_steps, root_reason = self._select_root_steps(body_axis, body_center)
+        self.args.root_steps = root_steps
+        adapter_elapsed = time.perf_counter() - start
         result = self.fitter.fit_single_frame(
             self.model,
             self.vposer,
@@ -93,10 +116,54 @@ class RealtimeSmplxRetargeter:
             prev_prev_state=self.prev_prev_result,
         )
         result["frame_index"] = np.array(frame_index, dtype=np.int32)
+        result["retarget_root_steps"] = np.array(root_steps, dtype=np.int32)
+        result["retarget_root_reason"] = np.array(root_reason)
+        if self.config.profile:
+            timings = dict(result.get("stage_timings", {}))
+            timings["input_adapter_s"] = adapter_elapsed
+            timings["retarget_update_s"] = time.perf_counter() - start
+            result["stage_timings"] = timings
+            if len(self.aggregate) == 0 or frame_index % max(1, self.config.profile_interval) == 0:
+                print(_format_timing_line(frame_index, timings, root_steps, root_reason), flush=True)
         self.aggregate.append(result)
         self.prev_prev_result = self.prev_result
         self.prev_result = result
+        self.prev_body_axis = body_axis
+        self.prev_body_center = body_center
         return result
+
+    def _select_root_steps(
+        self,
+        body_axis: np.ndarray | None,
+        body_center: np.ndarray | None,
+    ) -> tuple[int | None, str]:
+        if not self.config.realtime_adaptive_root:
+            return self.config.root_steps, "fixed"
+
+        recovery_steps = self.config.realtime_root_recovery_steps or _default_root_steps(self.config)
+        if self.prev_result is None:
+            return recovery_steps, "init"
+
+        prev_error = float(self.prev_result.get("body_mean_error_m", np.inf))
+        if prev_error > self.config.realtime_root_error_threshold_m:
+            return recovery_steps, "error"
+
+        if (
+            body_axis is not None
+            and self.prev_body_axis is not None
+            and _vector_angle_deg(body_axis, self.prev_body_axis) > self.config.realtime_root_turn_threshold_deg
+        ):
+            return recovery_steps, "turn"
+
+        if (
+            body_center is not None
+            and self.prev_body_center is not None
+            and float(np.linalg.norm(body_center - self.prev_body_center))
+            > self.config.realtime_root_translation_threshold_m
+        ):
+            return recovery_steps, "translation"
+
+        return max(1, self.config.realtime_root_steps), "steady"
 
     def save(self, source_npz: Path | None = None) -> Path:
         if not self.aggregate:
@@ -225,6 +292,14 @@ def run_mocap_retarget(npz_path: Path, mocap_session: Path, config: RetargetConf
             prev_state=prev_result,
             prev_prev_state=prev_prev_result,
         )
+        if args.profile:
+            print(
+                _format_timing_line(
+                    frame_index,
+                    dict(result.get("stage_timings", {})),
+                ),
+                flush=True,
+            )
         fitter.save_result(result, per_frame_dir, frame_index)
         if not args.no_mesh:
             fitter.save_mesh(result, model, per_frame_dir, frame_index, device)
@@ -261,6 +336,15 @@ def _save_sequence_npz(
         "left_hand_mean_error_m": np.array([item["left_hand_mean_error_m"] for item in aggregate], dtype=np.float32),
         "right_hand_mean_error_m": np.array([item["right_hand_mean_error_m"] for item in aggregate], dtype=np.float32),
     }
+    if all("retarget_root_steps" in item for item in aggregate):
+        payload["retarget_root_steps"] = np.array(
+            [item["retarget_root_steps"] for item in aggregate],
+            dtype=np.int32,
+        )
+    if all("retarget_root_reason" in item for item in aggregate):
+        payload["retarget_root_reason"] = np.array(
+            [_scalar_string(item["retarget_root_reason"]) for item in aggregate]
+        )
     if source_npz is not None:
         payload["source_npz"] = str(source_npz)
     np.savez_compressed(sequence_path, **payload)
@@ -288,6 +372,9 @@ def _build_reference_args(config: RetargetConfig, output_dir: Path, model_dir: P
         betas_sample_count=config.betas_sample_count,
         betas_steps=config.betas_steps,
         pose_steps=config.pose_steps,
+        root_steps=config.root_steps,
+        lower_steps=config.lower_steps,
+        lower_body_refine=config.lower_body_refine,
         lr=0.05,
         betas_lr=0.05,
         body_weight=5.0,
@@ -304,16 +391,71 @@ def _build_reference_args(config: RetargetConfig, output_dir: Path, model_dir: P
         no_plot=not config.save_debug_assets,
         early_stop_patience=20,
         early_stop_eps=1e-5,
-        temporal_weight=0.0,
-        velocity_weight=0.0,
-        acceleration_weight=0.002,
+        early_stop_check_interval=config.early_stop_check_interval,
+        temporal_weight=config.temporal_weight,
+        velocity_weight=config.velocity_weight,
+        acceleration_weight=config.acceleration_weight,
         disable_post_smooth=True,
         smooth_window=0,
         smooth_sigma=0.0,
         frame_step=config.frame_step,
         max_frames=config.max_frames,
         run_full_sequence=True,
+        profile=config.profile,
     )
+
+
+def _default_root_steps(config: RetargetConfig) -> int:
+    return int(config.root_steps or max(12, config.pose_steps // 4))
+
+
+def _format_timing_line(
+    frame_index: int,
+    timings: dict[str, float],
+    root_steps: int | None = None,
+    root_reason: str | None = None,
+) -> str:
+    fields = (
+        ("smplx_total", timings.get("retarget_update_s", 0.0)),
+        ("target_setup", timings.get("target_setup_s", 0.0)),
+        ("init", timings.get("init_s", 0.0)),
+        ("root_optimize", timings.get("root_s", 0.0)),
+        ("pose_optimize", timings.get("pose_s", 0.0)),
+        ("lower_body_refine", timings.get("lower_s", 0.0)),
+        ("final_forward", timings.get("final_s", 0.0)),
+    )
+    parts = [f"{name}={seconds * 1000.0:.1f}ms" for name, seconds in fields]
+    if root_steps is not None:
+        parts.insert(0, f"root_steps_used={root_steps}")
+    if root_reason is not None:
+        parts.insert(1, f"root_steps_reason={root_reason}")
+    return f"[mocap-profile] frame={frame_index} stage=retarget " + " ".join(parts)
+
+
+def _body_root_features(sequence: Any) -> tuple[np.ndarray | None, np.ndarray | None]:
+    try:
+        name_to_index = {name: idx for idx, name in enumerate(sequence.body_names)}
+        body = sequence.body[0]
+        left_hip = body[name_to_index["left_hip"]]
+        right_hip = body[name_to_index["right_hip"]]
+        center = body[name_to_index["hips_center"]]
+    except (AttributeError, IndexError, KeyError):
+        return None, None
+    if not np.all(np.isfinite(left_hip)) or not np.all(np.isfinite(right_hip)) or not np.all(np.isfinite(center)):
+        return None, None
+    axis = right_hip - left_hip
+    norm = float(np.linalg.norm(axis))
+    if norm < 1e-6:
+        return None, center.astype(np.float32)
+    return (axis / norm).astype(np.float32), center.astype(np.float32)
+
+
+def _vector_angle_deg(a: np.ndarray, b: np.ndarray) -> float:
+    denom = float(np.linalg.norm(a) * np.linalg.norm(b))
+    if denom < 1e-6:
+        return 0.0
+    cos_angle = float(np.clip(np.dot(a, b) / denom, -1.0, 1.0))
+    return float(np.degrees(np.arccos(cos_angle)))
 
 
 def _load_reference_fitter() -> ModuleType:
@@ -469,12 +611,32 @@ def _write_report(
         "frame_step": config.frame_step,
         "max_frames": config.max_frames,
         "input_scale": config.input_scale,
+        "pose_steps": config.pose_steps,
+        "root_steps": config.root_steps,
+        "lower_steps": config.lower_steps,
+        "lower_body_refine": config.lower_body_refine,
+        "early_stop_check_interval": config.early_stop_check_interval,
+        "temporal_weight": config.temporal_weight,
+        "velocity_weight": config.velocity_weight,
+        "acceleration_weight": config.acceleration_weight,
+        "realtime_adaptive_root": config.realtime_adaptive_root,
+        "realtime_root_steps": config.realtime_root_steps,
+        "realtime_root_recovery_steps": config.realtime_root_recovery_steps,
+        "realtime_root_error_threshold_m": config.realtime_root_error_threshold_m,
+        "realtime_root_turn_threshold_deg": config.realtime_root_turn_threshold_deg,
+        "realtime_root_translation_threshold_m": config.realtime_root_translation_threshold_m,
         "optimize_hands": config.optimize_hands,
         "mean_overall_error_m": float(np.mean([item["overall_mean_error_m"] for item in aggregate])),
         "mean_body_error_m": float(np.mean([item["body_mean_error_m"] for item in aggregate])),
         "mean_left_hand_error_m": float(np.mean([item["left_hand_mean_error_m"] for item in aggregate])),
         "mean_right_hand_error_m": float(np.mean([item["right_hand_mean_error_m"] for item in aggregate])),
     }
+    timing_summary = _summarize_stage_timings(aggregate)
+    if timing_summary:
+        report["stage_timings_s"] = timing_summary
+    root_summary = _summarize_root_adaptation(aggregate)
+    if root_summary:
+        report["realtime_root_adaptation"] = root_summary
     (output_dir / "trajectory_names.json").write_text(
         json.dumps(
             {
@@ -488,3 +650,52 @@ def _write_report(
     )
     with (output_dir / "retarget_report.yaml").open("w", encoding="utf-8") as handle:
         yaml.safe_dump(report, handle, sort_keys=False, allow_unicode=False)
+
+
+def _summarize_stage_timings(aggregate: list[dict[str, np.ndarray]]) -> dict[str, dict[str, float]]:
+    stage_names = sorted(
+        {
+            key
+            for item in aggregate
+            for key in item.get("stage_timings", {}).keys()
+            if isinstance(item.get("stage_timings"), dict)
+        }
+    )
+    summary: dict[str, dict[str, float]] = {}
+    for stage_name in stage_names:
+        values = np.array(
+            [
+                float(item["stage_timings"][stage_name])
+                for item in aggregate
+                if isinstance(item.get("stage_timings"), dict) and stage_name in item["stage_timings"]
+            ],
+            dtype=np.float64,
+        )
+        if values.size == 0:
+            continue
+        summary[stage_name] = {
+            "mean": float(np.mean(values)),
+            "p50": float(np.percentile(values, 50)),
+            "p90": float(np.percentile(values, 90)),
+            "max": float(np.max(values)),
+        }
+    return summary
+
+
+def _summarize_root_adaptation(aggregate: list[dict[str, np.ndarray]]) -> dict[str, Any]:
+    if not all("retarget_root_steps" in item and "retarget_root_reason" in item for item in aggregate):
+        return {}
+    steps = np.array([int(item["retarget_root_steps"]) for item in aggregate], dtype=np.int32)
+    reasons = [_scalar_string(item["retarget_root_reason"]) for item in aggregate]
+    reason_counts = {reason: reasons.count(reason) for reason in sorted(set(reasons))}
+    return {
+        "mean_root_steps": float(np.mean(steps)),
+        "max_root_steps": int(np.max(steps)),
+        "reason_counts": reason_counts,
+    }
+
+
+def _scalar_string(value: Any) -> str:
+    if isinstance(value, np.ndarray):
+        return str(value.item())
+    return str(value)

@@ -45,7 +45,7 @@ def main() -> None:
     parser.add_argument("--frames", type=int, default=100)
     parser.add_argument("--complexities", type=int, nargs="+", default=[0, 1, 2], choices=[0, 1, 2])
     parser.add_argument("--no-hands", action="store_true")
-    parser.add_argument("--delegate", default="cpu", choices=["cpu", "gpu"])
+    parser.add_argument("--inference-device", default="cpu", choices=["cpu", "gpu", "cuda"])
     parser.add_argument("--output-dir", type=Path)
     args = parser.parse_args()
 
@@ -56,7 +56,7 @@ def main() -> None:
         frame_limit=args.frames,
         complexities=args.complexities,
         hands_enabled=not args.no_hands,
-        delegate=args.delegate,
+        delegate=_mediapipe_delegate_from_inference_device(args.inference_device),
         output_dir=args.output_dir,
     )
     print(yaml.safe_dump(report, sort_keys=False, allow_unicode=False))
@@ -134,6 +134,10 @@ def benchmark_realtime_models(
     print(f"Saved realtime benchmark report: {yaml_path}")
     print(f"Saved realtime benchmark summary: {csv_path}")
     return benchmark_report
+
+
+def _mediapipe_delegate_from_inference_device(device: str) -> str:
+    return "gpu" if device in {"gpu", "cuda"} else "cpu"
 
 
 def _benchmark_one_complexity(

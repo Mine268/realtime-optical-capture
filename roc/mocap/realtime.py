@@ -26,6 +26,25 @@ from roc.triangulation.cameras import camera_group_names, camera_order_indices, 
 from roc.triangulation.triangulate import triangulate_sequence
 
 
+def _format_estimate_profile_line(frame_index: int, timings: dict[str, float]) -> str:
+    retarget_s = timings.get("retarget_s", 0.0)
+    estimate_only_s = max(0.0, timings.get("frame_total_s", 0.0) - retarget_s)
+    fields = (
+        ("mocap_loop_total", timings.get("frame_total_s", 0.0)),
+        ("estimate_only", estimate_only_s),
+        ("mvs_capture", timings.get("capture_s", 0.0)),
+        ("video_write", timings.get("video_write_s", 0.0)),
+        ("mediapipe_pose", timings.get("pose_s", 0.0)),
+        ("mediapipe_hands", timings.get("hands_s", 0.0)),
+        ("buffer_append", timings.get("append_s", 0.0)),
+        ("triangulate_3d", timings.get("triangulate_s", 0.0)),
+        ("postprocess_3d", timings.get("postprocess_s", 0.0)),
+        ("smplx_retarget", retarget_s),
+    )
+    parts = [f"{name}={seconds * 1000.0:.1f}ms" for name, seconds in fields]
+    return f"[mocap-profile] frame={frame_index} stage=estimate " + " ".join(parts)
+
+
 def run_mocap_realtime(
     prepare_session: Path,
     calib_session: Path,
@@ -38,6 +57,7 @@ def run_mocap_realtime(
     delegate: str = "cpu",
     offline_source_dir: Path | None = None,
     retarget_config: RetargetConfig | None = None,
+    profile: bool = False,
 ) -> None:
     prepare_session = prepare_session.resolve()
     calib_session = calib_session.resolve()
@@ -161,6 +181,17 @@ def run_mocap_realtime(
 
                     frame_index = 0
                     while True:
+                        frame_start = time.perf_counter()
+                        profile_times = {
+                            "capture_s": 0.0,
+                            "video_write_s": 0.0,
+                            "pose_s": 0.0,
+                            "hands_s": 0.0,
+                            "append_s": 0.0,
+                            "triangulate_s": 0.0,
+                            "postprocess_s": 0.0,
+                            "retarget_s": 0.0,
+                        }
                         frame_set_timestamp_ns = time.time_ns()
                         frame_set_pose = []
                         frame_set_pose_conf = []
@@ -173,7 +204,9 @@ def run_mocap_realtime(
                         timestamp_ms = frame_index * int(1000 / max(fps, 1.0))
 
                         for serial, camera in cameras:
+                            stage_start = time.perf_counter()
                             frame = camera.snapshot(fps_sleep=min(0.1, 0.5 / max(fps, 1.0)))
+                            profile_times["capture_s"] += time.perf_counter() - stage_start
                             if frame is None:
                                 raise RuntimeError(f"No frame received for camera {serial}")
 
@@ -187,11 +220,17 @@ def run_mocap_realtime(
                                     fps,
                                 )
                             if record_videos:
+                                stage_start = time.perf_counter()
                                 writers[serial].write(frame)
+                                profile_times["video_write_s"] += time.perf_counter() - stage_start
 
                             tracker = trackers[serial]
+                            stage_start = time.perf_counter()
                             pose_result = tracker.detect_pose(frame, timestamp_ms=timestamp_ms)
+                            profile_times["pose_s"] += time.perf_counter() - stage_start
+                            stage_start = time.perf_counter()
                             hand_result = tracker.detect_hands(frame, timestamp_ms=timestamp_ms)
+                            profile_times["hands_s"] += time.perf_counter() - stage_start
                             valid = ~np.isnan(pose_result.xy[:, 0])
                             if np.any(valid):
                                 xy = pose_result.xy[valid]
@@ -216,6 +255,7 @@ def run_mocap_realtime(
                                         cv2.circle(overlay, (int(point[0]), int(point[1])), 2, (0, 255, 0), -1)
                                 preview_frames.append(overlay)
 
+                        stage_start = time.perf_counter()
                         timestamps.append(timestamp_ms)
                         pose_2d.append(np.stack(frame_set_pose, axis=0))
                         pose_conf.append(np.stack(frame_set_pose_conf, axis=0))
@@ -225,8 +265,10 @@ def run_mocap_realtime(
                         right_hand_conf.append(np.stack(frame_set_right_conf, axis=0))
                         bboxes.append(np.stack(frame_set_bbox, axis=0))
                         frame_timestamps_ns.append(frame_set_timestamp_ns)
+                        profile_times["append_s"] += time.perf_counter() - stage_start
 
                         if realtime_postprocessor is not None and realtime_retargeter is not None:
+                            stage_start = time.perf_counter()
                             frame_pose_np = np.stack(frame_set_pose, axis=0).astype(np.float32)[reorder_indices]
                             frame_pose_conf_np = np.stack(frame_set_pose_conf, axis=0).astype(np.float32)[reorder_indices]
                             frame_left_np = np.stack(frame_set_left, axis=0).astype(np.float32)[reorder_indices]
@@ -240,8 +282,17 @@ def run_mocap_realtime(
                             )
                             frame_landmarks_2d = np.where(frame_conf[..., None] <= 0.1, np.nan, frame_landmarks_2d)
                             frame_points_3d, _ = triangulate_sequence(camera_group, frame_landmarks_2d[:, None, :, :])
+                            profile_times["triangulate_s"] += time.perf_counter() - stage_start
+                            stage_start = time.perf_counter()
                             processed_points_3d = realtime_postprocessor.update(frame_points_3d[0])
+                            profile_times["postprocess_s"] += time.perf_counter() - stage_start
+                            stage_start = time.perf_counter()
                             realtime_retargeter.update(frame_index, processed_points_3d)
+                            profile_times["retarget_s"] += time.perf_counter() - stage_start
+
+                        if profile:
+                            profile_times["frame_total_s"] = time.perf_counter() - frame_start
+                            print(_format_estimate_profile_line(frame_index, profile_times), flush=True)
 
                         if frame_index % 25 == 0:
                             print(f"Processed frame set {frame_index}")
