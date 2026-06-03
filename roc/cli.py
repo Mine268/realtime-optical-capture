@@ -236,7 +236,7 @@ def build_parser() -> argparse.ArgumentParser:
     mocap_parser.add_argument(
         "--retarget-pose-steps",
         type=int,
-        default=120,
+        default=None,
         help="Per-frame SMPL-X pose optimization steps for --retarget",
     )
     mocap_parser.add_argument(
@@ -391,7 +391,7 @@ def main() -> None:
                 parser.error("--retarget requires 3D keypoints and is only supported for realtime or capture_estimate")
             if args.retarget_frame_step < 1:
                 parser.error("--retarget-frame-step must be >= 1")
-            if args.retarget_pose_steps < 1:
+            if args.retarget_pose_steps is not None and args.retarget_pose_steps < 1:
                 parser.error("--retarget-pose-steps must be >= 1")
             if args.retarget_betas_steps < 1:
                 parser.error("--retarget-betas-steps must be >= 1")
@@ -422,7 +422,10 @@ def main() -> None:
                 parser.error("--retarget-realtime-root-translation-threshold must be > 0")
             from roc.mocap.retarget import RetargetConfig, RetargetMode
             retarget_mode = RetargetMode(args.retarget_mode)
-            track_pose_steps = min(args.retarget_pose_steps, 20) if retarget_mode == RetargetMode.TRACK else 20
+            if retarget_mode == RetargetMode.TRACK:
+                track_pose_steps = args.retarget_pose_steps if args.retarget_pose_steps is not None else 25  # default in RetargetConfig
+            else:
+                track_pose_steps = 20
             track_recovery_pose_steps = (
                 max(track_pose_steps, min(60, max(8, track_pose_steps * 4)))
                 if retarget_mode == RetargetMode.TRACK
