@@ -225,7 +225,7 @@ class RealtimeSmplxTracker:
         _tgt = target_23
         _model = self.model
         _betas = self.shared_betas
-        tw = self.config.track_temporal_weight
+        tw = self.config.track_temporal_weight  # default 0.05 — light smoothing, Bezier spine provides stability
         _target_weights = self._target_weights
         _pose_prior_weights = self._pose_prior_weights
         _temporal_weights = self._temporal_weights
@@ -418,7 +418,7 @@ class RealtimeSmplxTracker:
     def save(self, source_npz: Path | None = None) -> Path:
         if not self.aggregate:
             raise RuntimeError("No track frames were produced")
-        _apply_so3_smooth(self.aggregate, sigma=0.30)
+        _apply_so3_smooth(self.aggregate, sigma=0.08)
         self._refresh_smoothed_joints()
         sequence_path = self.output_dir / "smplx_fit_sequence.npz"
         _save_sequence_npz(sequence_path, self.aggregate, self.config, source_npz=source_npz)
