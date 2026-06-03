@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from contextlib import ExitStack
 import traceback
@@ -165,6 +166,7 @@ def run_mocap_offline(
                         preview_frames = []
                         timestamp_ms = round(frame_index * 1000.0 / max(source_fps, 1.0))
 
+                        serial_to_frame: dict[str, np.ndarray] = {}
                         for serial, cap in caps:
                             stage_start = time.perf_counter()
                             ret, frame = cap.read()
@@ -173,58 +175,73 @@ def run_mocap_offline(
                                 frame = None
                             if frame is None:
                                 return _finalize(
-                                    session_paths,
-                                    capture_config,
-                                    timestamps,
-                                    pose_2d,
-                                    pose_conf,
-                                    left_hand_2d,
-                                    left_hand_conf,
-                                    right_hand_2d,
-                                    right_hand_conf,
-                                    bboxes,
-                                    camera_group,
-                                    calibrated_serials,
-                                    hands_enabled,
-                                    model_complexity,
-                                    source_video_dir,
-                                    source_fps,
-                                    postprocess_mode,
-                                    calibration_toml_path,
-                                    retarget_config,
-                                    profile,
+                                    session_paths, capture_config, timestamps,
+                                    pose_2d, pose_conf, left_hand_2d, left_hand_conf,
+                                    right_hand_2d, right_hand_conf, bboxes,
+                                    camera_group, calibrated_serials, hands_enabled,
+                                    model_complexity, source_video_dir, source_fps,
+                                    postprocess_mode, calibration_toml_path,
+                                    retarget_config, profile,
                                 )
+                            serial_to_frame[serial] = frame
 
-                            tracker = trackers[serial]
-                            stage_start = time.perf_counter()
-                            pose_result = tracker.detect_pose(frame, timestamp_ms=timestamp_ms)
-                            profile_times["pose_s"] += time.perf_counter() - stage_start
-                            stage_start = time.perf_counter()
-                            hand_result = tracker.detect_hands(frame, timestamp_ms=timestamp_ms)
-                            profile_times["hands_s"] += time.perf_counter() - stage_start
-                            valid = ~np.isnan(pose_result.xy[:, 0])
+                        # MediaPipe detection — parallel across cameras
+                        def _detect_one_offline(serial: str) -> dict:
+                            frame = serial_to_frame[serial]
+                            trk = trackers[serial]
+                            t0 = time.perf_counter()
+                            pose = trk.detect_pose(frame, timestamp_ms=timestamp_ms)
+                            t1 = time.perf_counter()
+                            hand = trk.detect_hands(frame, timestamp_ms=timestamp_ms)
+                            t2 = time.perf_counter()
+                            valid = ~np.isnan(pose.xy[:, 0])
                             if np.any(valid):
-                                xy = pose_result.xy[valid]
-                                x0, y0 = np.min(xy, axis=0)
-                                x1, y1 = np.max(xy, axis=0)
-                                bbox = np.array([x0, y0, x1, y1], dtype=np.float32)
+                                xy_p = pose.xy[valid]
+                                bb = np.array([np.min(xy_p[:,0]), np.min(xy_p[:,1]),
+                                               np.max(xy_p[:,0]), np.max(xy_p[:,1])], dtype=np.float32)
                             else:
-                                bbox = np.array([np.nan, np.nan, np.nan, np.nan], dtype=np.float32)
-
-                            frame_set_pose.append(pose_result.xy)
-                            frame_set_pose_conf.append(pose_result.confidence)
-                            frame_set_left.append(hand_result.left_xy)
-                            frame_set_left_conf.append(hand_result.left_confidence)
-                            frame_set_right.append(hand_result.right_xy)
-                            frame_set_right_conf.append(hand_result.right_confidence)
-                            frame_set_bbox.append(bbox)
-
+                                bb = np.array([np.nan]*4, dtype=np.float32)
+                            overlay = None
                             if show_preview:
                                 overlay = frame.copy()
-                                for point in pose_result.xy:
-                                    if not np.isnan(point[0]):
-                                        cv2.circle(overlay, (int(point[0]), int(point[1])), 2, (0, 255, 0), -1)
-                                preview_frames.append(overlay)
+                                for pt in pose.xy:
+                                    if not np.isnan(pt[0]):
+                                        cv2.circle(overlay, (int(pt[0]), int(pt[1])), 2, (0, 255, 0), -1)
+                            return {
+                                "serial": serial,
+                                "pose_xy": pose.xy, "pose_conf": pose.confidence,
+                                "hand_left_xy": hand.left_xy, "hand_left_conf": hand.left_confidence,
+                                "hand_right_xy": hand.right_xy, "hand_right_conf": hand.right_confidence,
+                                "bbox": bb, "overlay": overlay,
+                                "pose_s": t1 - t0, "hands_s": t2 - t1,
+                            }
+
+                        ordered_results: list[dict] = []
+                        with ThreadPoolExecutor(max_workers=len(caps)) as pool:
+                            future_to_serial = {
+                                pool.submit(_detect_one_offline, serial): serial
+                                for serial, _ in caps
+                            }
+                            serial_to_result = {}
+                            for future in as_completed(future_to_serial):
+                                r = future.result()
+                                serial_to_result[r["serial"]] = r
+                                profile_times["pose_s"] += r["pose_s"]
+                                profile_times["hands_s"] += r["hands_s"]
+                            ordered_results = [
+                                serial_to_result[serial] for serial, _ in caps
+                            ]
+
+                        for r in ordered_results:
+                            frame_set_pose.append(r["pose_xy"])
+                            frame_set_pose_conf.append(r["pose_conf"])
+                            frame_set_left.append(r["hand_left_xy"])
+                            frame_set_left_conf.append(r["hand_left_conf"])
+                            frame_set_right.append(r["hand_right_xy"])
+                            frame_set_right_conf.append(r["hand_right_conf"])
+                            frame_set_bbox.append(r["bbox"])
+                            if show_preview and r["overlay"] is not None:
+                                preview_frames.append(r["overlay"])
 
                         stage_start = time.perf_counter()
                         timestamps.append(timestamp_ms)
