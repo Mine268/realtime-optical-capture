@@ -62,6 +62,7 @@ def run_mocap_offline(
     if not source_video_dir.is_dir():
         raise RuntimeError(f"Video directory not found: {source_video_dir}")
 
+    mocap_session.mkdir(parents=True, exist_ok=True)
     session_paths = get_existing_mocap_session(mocap_session)
     capture_config_path = prepare_session / "capture_config.yaml"
     calibration_yaml_path = calib_session / "calibration.yaml"
