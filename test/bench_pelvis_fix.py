@@ -74,7 +74,9 @@ pts = data["points_3d_raw"]
 fk_m = torch.compile(SkeletonFKVec(full_model), mode="default")
 config = RetargetConfig(mode=RetargetMode.TRACK, device="cpu", model_dir=Path("models/smplx"))
 config.track_pose_steps = 30
-tracker = RealtimeSmplxTracker(config, Path("/tmp/pelvis_fix"))
+output_dir = Path("sessions/mocap_live_rkw_20260603_test01/smplx_track_fkvec_s30_final")
+output_dir.mkdir(parents=True, exist_ok=True)
+tracker = RealtimeSmplxTracker(config, output_dir)
 tracker.model = fk_m
 
 for i in range(150):
@@ -115,3 +117,19 @@ m = min(len(tj), len(fj))
 bad_sp = sum(1 for i in range(m) if i in fm and np.nanmax(sa(tj[i]/sc,S)) - np.nanmax(sa(fj[fm[i]]/sc,S)) > 15)
 opp = sum(1 for i in range(m) if i in fm and abs(t_bp[i,1])>0.3 and abs(t_bp[i,4])>0.3 and t_bp[i,1]*t_bp[i,4]<0)
 print(f"\nAll: spine>fit+15°={bad_sp}/{m}  opposite_hip={opp}/{m}")
+
+# Save and render video
+npz_path = tracker.save(source_npz=mocap_npz)
+import yaml
+r = yaml.safe_load((output_dir / "track_report.yaml").read_text())
+print(f"Body error: {r['mean_body_error_m']*1000:.1f}mm")
+
+from roc.mocap.render_reprojection_overlays import render_smplx_reprojection_overlays
+render_smplx_reprojection_overlays(
+    mocap_npz_path=mocap_npz, smplx_npz_path=npz_path,
+    calibration_toml=Path("sessions/calib_20260603_102832/calibration.toml"),
+    video_dir=Path("sessions/mocap_live_rkw_20260603_test01/videos"),
+    output_dir=Path("sessions/mocap_live_rkw_20260603_test01/reprojection_videos/track_fkvec_s30_final"),
+    confidence_threshold=0.1, frame_limit=0, combined_scale=0.5,
+)
+print("Video: sessions/.../reprojection_videos/track_fkvec_s30_final/combined_smplx_reprojection_overlay.mp4")
