@@ -418,7 +418,7 @@ class RealtimeSmplxTracker:
     def save(self, source_npz: Path | None = None) -> Path:
         if not self.aggregate:
             raise RuntimeError("No track frames were produced")
-        _apply_so3_smooth(self.aggregate, sigma=0.08)
+        _apply_so3_smooth(self.aggregate, sigma=0.03)
         self._refresh_smoothed_joints()
         sequence_path = self.output_dir / "smplx_fit_sequence.npz"
         _save_sequence_npz(sequence_path, self.aggregate, self.config, source_npz=source_npz)
@@ -725,9 +725,9 @@ def _target_weight(name: str) -> float:
 
 def _target_smooth_alpha(name: str) -> float:
     if name in {"left_wrist", "right_wrist"}:
-        return 0.20
+        return 0.05
     if name in {"left_elbow", "right_elbow"}:
-        return 0.35
+        return 0.10
     return 0.0
 
 
@@ -752,13 +752,15 @@ def _body_pose_prior_weights() -> np.ndarray:
 
 def _body_pose_temporal_weights() -> np.ndarray:
     weights = np.ones(63, dtype=np.float32)
-    for joint in (12, 13):
-        _set_joint_weight(weights, joint, 2.4)
-    for joint in (15, 16, 17, 18):
-        _set_joint_weight(weights, joint, 1.8)
-    for joint in (19, 20):
+    for joint in (12, 13):           # collar
         _set_joint_weight(weights, joint, 1.2)
-    for joint in (3, 4, 6, 7, 9, 10):
+    for joint in (15, 16, 17, 18):   # shoulders, elbows
+        _set_joint_weight(weights, joint, 1.2)
+    for joint in (19, 20):           # wrists
+        _set_joint_weight(weights, joint, 0.8)
+    for joint in (2, 5, 8):          # spine1, spine2, spine3 — Bezier handles
+        _set_joint_weight(weights, joint, 0.5)
+    for joint in (3, 4, 6, 7, 9, 10):   # legs
         _set_joint_weight(weights, joint, 0.65)
     return weights
 
