@@ -169,9 +169,9 @@ class RealtimeSmplxTracker:
         self._bezier_t = self.T.tensor([0.0, 0.25, 0.50, 0.65, 1.0],
                                         device=self.device, dtype=self.T.float32)
         self._bezier_p1_along = 0.25   # P1 along fraction
-        self._bezier_p1_perp = 0.18    # P1 perpendicular fraction
+        self._bezier_p1_perp = 0.08    # P1 perpendicular fraction (minimal forward curve)
         self._bezier_p2_along = 0.67   # P2 along fraction
-        self._bezier_p2_perp = 0.22    # P2 perpendicular fraction
+        self._bezier_p2_perp = 0.12    # P2 perpendicular fraction
 
         # Warm-start state on GPU
         self._prev_bp = self.T.zeros(1, 63, device=self.device)
