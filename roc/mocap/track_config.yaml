@@ -82,8 +82,8 @@ body_pose_prior_weights:
   # 19=left_wrist 20=right_wrist
   default: 0.005
   joints:
-    0: 0.010   # left_hip
-    1: 0.010   # right_hip
+    0: 0.020   # left_hip
+    1: 0.020   # right_hip
     2: 0.040   # spine1
     5: 0.045   # spine2
     8: 0.045   # spine3

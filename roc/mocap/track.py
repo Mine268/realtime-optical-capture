@@ -217,6 +217,9 @@ class RealtimeSmplxTracker:
             device=self.device,
             dtype=self.T.float32,
         ).view(1, 63)
+        # Boost hip Y-axis prior to prevent extreme opposite twist (0.020 → 0.060)
+        self._pose_prior_weights[0, 1] *= 3.0  # left_hip Y
+        self._pose_prior_weights[0, 4] *= 3.0  # right_hip Y
         self._temporal_weights = self.T.tensor(
             _body_pose_temporal_weights(tcfg),
             device=self.device,
