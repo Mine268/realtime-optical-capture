@@ -270,6 +270,11 @@ class RealtimeSmplxTracker:
         if n_valid < 3:
             return self._empty_result(frame_index)
 
+        # Track first valid frame index for multi-frame recovery
+        if not hasattr(self, '_first_valid_frame'):
+            self._first_valid_frame = frame_index
+        early_frames = frame_index <= self._first_valid_frame + 4
+
         # Fresh parameters from warm-start
         bp = self._prev_bp.clone().detach().requires_grad_(True)
         go = self._prev_go.clone().detach().requires_grad_(True)
@@ -292,6 +297,11 @@ class RealtimeSmplxTracker:
         tw = self.config.track_temporal_weight  # default 0.05 — light smoothing, Bezier spine provides stability
         _target_weights = self._target_weights
         _pose_prior_weights = self._pose_prior_weights
+        if early_frames:
+            # Boost hip priors 5x during early frames to prevent extreme Y twist
+            boosted = _pose_prior_weights.clone()
+            boosted[0, 0:6] *= 5.0  # left_hip + right_hip, all 3 axes
+            _pose_prior_weights = boosted
         _temporal_weights = self._temporal_weights
         _smplx_knee_triplets = self._smplx_knee_triplets
         _target_knee_triplets = self._target_knee_triplets
@@ -310,7 +320,8 @@ class RealtimeSmplxTracker:
         # Adam with joint-specific priors. Knees stay loose so squats can bend.
         steady_steps = max(1, int(self.config.track_pose_steps))
         recovery_steps = max(steady_steps, int(self.config.track_recovery_pose_steps))
-        n_steps = recovery_steps if not has_prev else steady_steps
+        # Use recovery steps for first 5 valid frames to escape bad local minima
+        n_steps = recovery_steps if early_frames else steady_steps
         adapter_elapsed = time.perf_counter() - start
 
         opt_cfg = self._tcfg.get("optimizer", {})
