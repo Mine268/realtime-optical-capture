@@ -169,9 +169,20 @@ class RealtimeSmplxTracker:
         self._bezier_t = self.T.tensor([0.0, 0.25, 0.50, 0.65, 1.0],
                                         device=self.device, dtype=self.T.float32)
         self._bezier_p1_along = 0.25   # P1 along fraction
-        self._bezier_p1_perp = 0.08    # P1 perpendicular fraction (minimal forward curve)
+        self._bezier_p1_perp = 0.12    # P1 perpendicular fraction (moderate)
         self._bezier_p2_along = 0.67   # P2 along fraction
-        self._bezier_p2_perp = 0.12    # P2 perpendicular fraction
+        self._bezier_p2_perp = 0.16    # P2 perpendicular fraction (moderate)
+
+        # Spine direction: SMPL-X pelvis→neck indices + target hip/shoulder refs
+        self._smplx_spine_dir_idx = self.T.tensor(
+            [self._smplx_spine_chain[0], self._smplx_spine_chain[4]],
+            device=self.device, dtype=self.T.long,
+        )
+
+        # Pelvis frame: SMPL-X full-skeleton indices for pelvis+hips triangle
+        self._smplx_pelvis_idx = self.joint_name_to_idx["pelvis"]
+        self._smplx_hip_l_idx = self.joint_name_to_idx["left_hip"]
+        self._smplx_hip_r_idx = self.joint_name_to_idx["right_hip"]
 
         # Warm-start state on GPU
         self._prev_bp = self.T.zeros(1, 63, device=self.device)
@@ -271,14 +282,14 @@ class RealtimeSmplxTracker:
             loss = (valid_weights[:, None] * diffs.square()).sum() / (3.0 * valid_weights.sum().clamp_min(1e-6))
 
             loss = loss + T.mean(_pose_prior_weights * bp.square())
-            loss = loss + 0.08 * _knee_angle_loss(
+            loss = loss + 0.04 * _knee_angle_loss(
                 T,
                 out.joints[0],
                 target_full,
                 _smplx_knee_triplets,
                 _target_knee_triplets,
             )
-            loss = loss + 0.04 * _knee_angle_loss(
+            loss = loss + 0.03 * _knee_angle_loss(
                 T,
                 out.joints[0],
                 target_full,
@@ -310,13 +321,30 @@ class RealtimeSmplxTracker:
                 0, 0,
                 _target_hip_l,
                 _target_hip_r,
+                p1_along=self._bezier_p1_along,
+                p1_perp=self._bezier_p1_perp,
+                p2_along=self._bezier_p2_along,
+                p2_perp=self._bezier_p2_perp,
             )
-            loss = loss + 0.10 * _spine_sagittal_loss(
+            loss = loss + 0.12 * _spine_sagittal_loss(
                 T,
                 out.joints[0],
                 _smplx_spine_chain,
+                target_points=target_full,
+                tgt_hip_l_idx=_target_hip_l,
+                tgt_hip_r_idx=_target_hip_r,
             )
-            loss = loss + 0.06 * _hip_symmetry_loss(T, bp)
+            loss = loss + 0.03 * _hip_symmetry_loss(T, bp)
+            loss = loss + 0.20 * _pelvis_frame_loss(
+                T,
+                out.joints[0],
+                target_full,
+                self._smplx_pelvis_idx,
+                self._smplx_hip_l_idx,
+                self._smplx_hip_r_idx,
+                _target_hip_l,
+                _target_hip_r,
+            )
 
             if has_prev:
                 loss = loss + tw * (
@@ -548,17 +576,32 @@ def _spine_direction_loss(
     T: object,
     pred_joints: object,
     target_points: object,
-    smplx_spine_idx: object,
-    target_spine_idx: object,
+    smplx_spine_dir_idx: object,
+    tgt_hip_l_idx: int,
+    tgt_hip_r_idx: int,
+    tgt_shoulder_l_idx: int = 11,
+    tgt_shoulder_r_idx: int = 12,
 ) -> object:
-    """Penalise deviation between SMPL-X spine direction (pelvis→neck) and target."""
-    pred_pelvis = pred_joints[smplx_spine_idx[0]]
-    pred_neck = pred_joints[smplx_spine_idx[1]]
-    tgt_hips = target_points[target_spine_idx[0]]
-    tgt_neck = target_points[target_spine_idx[1]]
+    """Penalise angular deviation of SMPL-X spine direction vs target.
 
-    if not bool(T.isfinite(tgt_hips).all() & T.isfinite(tgt_neck).all()):
+    Target spine direction is computed from MediaPipe hip and shoulder centres,
+    not from derived BODY_NAMES indices (which are absent from the raw array).
+    """
+    pred_pelvis = pred_joints[smplx_spine_dir_idx[0]]
+    pred_neck = pred_joints[smplx_spine_dir_idx[1]]
+
+    tgt_hl = target_points[tgt_hip_l_idx]
+    tgt_hr = target_points[tgt_hip_r_idx]
+    tgt_sl = target_points[tgt_shoulder_l_idx]
+    tgt_sr = target_points[tgt_shoulder_r_idx]
+
+    valid = (T.isfinite(tgt_hl).all() & T.isfinite(tgt_hr).all() &
+             T.isfinite(tgt_sl).all() & T.isfinite(tgt_sr).all())
+    if not bool(valid):
         return pred_joints.sum() * 0.0
+
+    tgt_hips = (tgt_hl + tgt_hr) / 2.0
+    tgt_neck = (tgt_sl + tgt_sr) / 2.0
 
     pred_dir = pred_neck - pred_pelvis
     tgt_dir = tgt_neck - tgt_hips
@@ -570,8 +613,6 @@ def _spine_direction_loss(
 
     pred_dir = pred_dir / pred_norm
     tgt_dir = tgt_dir / tgt_norm
-
-    # Cosine distance: penalise any angular deviation of the spine axis
     return 1.0 - T.dot(pred_dir, tgt_dir)
 
 
@@ -596,8 +637,8 @@ def _spine_bezier_loss(
     hip_r_idx: int,            # BODY_NAMES index for right_hip
     shoulder_l_idx: int = 11,  # BODY_NAMES index for left_shoulder → raw MP index 11
     shoulder_r_idx: int = 12,  # BODY_NAMES index for right_shoulder → raw MP index 12
-    p1_along: float = 0.27, p1_perp: float = 0.24,
-    p2_along: float = 0.69, p2_perp: float = 0.28,
+    p1_along: float = 0.25, p1_perp: float = 0.12,
+    p2_along: float = 0.67, p2_perp: float = 0.16,
 ) -> object:
     """Penalise spine joints deviating from a Bezier curve anchored by computed target positions.
 
@@ -652,26 +693,34 @@ def _spine_sagittal_loss(
     T: object,
     pred_joints: object,
     smplx_spine_chain: object,
+    target_points: object | None = None,
+    tgt_hip_l_idx: int = 23,
+    tgt_hip_r_idx: int = 24,
 ) -> object:
     """Penalise lateral (side-to-side) bending of the spine.
 
-    The spine should bend in the sagittal plane (forward), not left-right.
-    The hip axis (left_hip→right_hip) defines the lateral direction.
-    Any spine joint deviation in this direction relative to the pelvis→neck
-    line is penalised.
+    The spine should bend primarily in the sagittal plane (forward), not
+    left-right.  Uses the target (MediaPipe) hip axis to define the lateral
+    reference direction, avoiding circular dependency on predicted SMPL-X hips
+    that may themselves be twisted.
     """
-    # SMPL-X hip and spine positions
-    left_hip = pred_joints[1]   # SMPL-X left_hip
-    right_hip = pred_joints[2]  # SMPL-X right_hip
-    spine_pts = pred_joints[smplx_spine_chain]  # pelvis, spine1, spine2, spine3, neck
+    # Use target hip axis as lateral reference (avoids circular dependency)
+    if target_points is not None:
+        tgt_hl = target_points[tgt_hip_l_idx]
+        tgt_hr = target_points[tgt_hip_r_idx]
+        if T.isfinite(tgt_hl).all() & T.isfinite(tgt_hr).all():
+            hip_axis = tgt_hr - tgt_hl
+        else:
+            hip_axis = pred_joints[2] - pred_joints[1]
+    else:
+        hip_axis = pred_joints[2] - pred_joints[1]
 
-    hip_axis = right_hip - left_hip
     hip_axis_norm = T.linalg.norm(hip_axis)
     if hip_axis_norm < 1e-8:
         return pred_joints.sum() * 0.0
     lateral_dir = hip_axis / hip_axis_norm
 
-    # For each spine joint, compute lateral displacement from the pelvis→neck line
+    spine_pts = pred_joints[smplx_spine_chain]
     pelvis = spine_pts[0]
     neck = spine_pts[4]
     spine_dir = neck - pelvis
@@ -683,25 +732,62 @@ def _spine_sagittal_loss(
     loss = 0.0
     for i in range(1, 4):
         to_pelvis = spine_pts[i] - pelvis
-        # Project onto pelvis→neck line
         along = T.dot(to_pelvis, spine_dir)
-        # Projection point on the line
         proj = pelvis + along * spine_dir
-        # Deviation from the line
         dev = spine_pts[i] - proj
-        # Lateral component (projection onto hip_axis direction)
         lateral = T.dot(dev, lateral_dir)
         loss = loss + lateral.square()
     return loss / 3.0
 
 
 def _hip_symmetry_loss(T: object, body_pose: object) -> object:
-    """Penalise asymmetric left/right hip rotation magnitudes."""
-    l_hip = body_pose[:, 3:6]
-    r_hip = body_pose[:, 6:9]
+    """Penalise asymmetric left/right hip rotation magnitudes.
+
+    body_pose[0] = left_hip, body_pose[1] = right_hip.
+    """
+    l_hip = body_pose[:, 0:3]
+    r_hip = body_pose[:, 3:6]
     l_norm = T.linalg.norm(l_hip, dim=1)
     r_norm = T.linalg.norm(r_hip, dim=1)
     return T.mean((l_norm - r_norm).square())
+
+
+def _pelvis_frame_loss(
+    T: object,
+    pred_joints: object,       # (127, 3) SMPL-X full skeleton
+    target_points: object,     # (75, 3) MediaPipe landmarks
+    pelvis_idx: int,           # SMPL-X full-skeleton index for pelvis
+    hip_l_idx: int,            # SMPL-X full-skeleton index for left_hip
+    hip_r_idx: int,            # SMPL-X full-skeleton index for right_hip
+    tgt_hip_l_idx: int,        # BODY_NAMES index (also MediaPipe index) for left_hip
+    tgt_hip_r_idx: int,        # BODY_NAMES index for right_hip
+) -> object:
+    """Enforce pelvis+hips triangle matches target as a rigid body.
+
+    The vectors from pelvis to left/right hip in SMPL-X should match the
+    corresponding vectors in the MediaPipe target. This couples pelvis
+    orientation and hip rotations structurally, without blindly suppressing
+    individual joint rotations.
+    """
+    tgt_L = target_points[tgt_hip_l_idx]
+    tgt_R = target_points[tgt_hip_r_idx]
+
+    if not bool(T.isfinite(tgt_L).all() & T.isfinite(tgt_R).all()):
+        return pred_joints.sum() * 0.0
+
+    tgt_center = (tgt_L + tgt_R) / 2.0
+    tgt_vec_L = tgt_L - tgt_center
+    tgt_vec_R = tgt_R - tgt_center
+
+    pred_pelvis = pred_joints[pelvis_idx]
+    pred_L = pred_joints[hip_l_idx]
+    pred_R = pred_joints[hip_r_idx]
+
+    pred_vec_L = pred_L - pred_pelvis
+    pred_vec_R = pred_R - pred_pelvis
+
+    return (T.sum((pred_vec_L - tgt_vec_L).square()) +
+            T.sum((pred_vec_R - tgt_vec_R).square())) / 2.0
 
 
 def _horizontal_axis(T: object, axis: object) -> object:
@@ -743,42 +829,63 @@ def _target_smooth_alpha(name: str) -> float:
 
 
 def _body_pose_prior_weights() -> np.ndarray:
-    weights = np.full(63, 0.018, dtype=np.float32)
-    _set_joint_weight(weights, 0, 0.060)   # pelvis — rigid anchor
-    _set_joint_weight(weights, 1, 0.050)   # left_hip — part of pelvis rigid body
-    _set_joint_weight(weights, 2, 0.050)   # right_hip
-    # Extra: penalise hip Y (twist) more than XY bending
-    weights[4] *= 3.0   # left_hip Y: 0.150 — femur twist is unnatural
-    weights[7] *= 3.0   # right_hip Y: 0.150
-    _set_joint_weight(weights, 3, 0.045)   # spine1
-    _set_joint_weight(weights, 5, 0.045)   # spine2
-    _set_joint_weight(weights, 8, 0.045)   # spine3
-    _set_joint_weight(weights, 11, 0.035)  # neck
-    _set_joint_weight(weights, 12, 0.035)  # left_collar
-    _set_joint_weight(weights, 13, 0.035)  # right_collar
-    _set_joint_weight(weights, 3, 0.010)   # left_knee
-    _set_joint_weight(weights, 4, 0.010)   # right_knee
-    _set_joint_weight(weights, 6, 0.010)   # left_ankle
-    _set_joint_weight(weights, 7, 0.010)   # right_ankle
-    _set_joint_weight(weights, 9, 0.012)   # left_foot
-    _set_joint_weight(weights, 10, 0.012)  # right_foot
-    _set_joint_weight(weights, 19, 0.120)  # left_wrist
-    _set_joint_weight(weights, 20, 0.120)  # right_wrist
+    """Per-joint L2 regularisation weights for body_pose (21 joints × 3 = 63).
+
+    body_pose ordering (verified against SMPL-X model by perturbation test):
+      0=left_hip  1=right_hip  2=spine1  3=left_knee  4=right_knee
+      5=spine2  6=left_ankle  7=right_ankle  8=spine3  9=left_foot
+      10=right_foot  11=neck  12=left_collar  13=right_collar  14=head
+      15=left_shoulder  16=right_shoulder  17=left_elbow  18=right_elbow
+      19=left_wrist  20=right_wrist
+
+    Spine priors kept moderately high to prevent excessive bending — the
+    Bezier + sagittal losses provide geometric guidance, priors bound the
+    extremes.  Knees/ankles/feet are left nearly free for natural motion.
+    """
+    weights = np.full(63, 0.005, dtype=np.float32)
+    _set_joint_weight(weights, 0, 0.010)   # left_hip
+    _set_joint_weight(weights, 1, 0.010)   # right_hip
+    _set_joint_weight(weights, 2, 0.040)   # spine1 — track_final level
+    _set_joint_weight(weights, 5, 0.045)   # spine2 — track_final level
+    _set_joint_weight(weights, 8, 0.045)   # spine3 — track_final level
+    _set_joint_weight(weights, 11, 0.030)  # neck
+    _set_joint_weight(weights, 12, 0.030)  # left_collar
+    _set_joint_weight(weights, 13, 0.030)  # right_collar
+    _set_joint_weight(weights, 14, 0.020)  # head
+    _set_joint_weight(weights, 15, 0.020)  # left_shoulder
+    _set_joint_weight(weights, 16, 0.020)  # right_shoulder
+    _set_joint_weight(weights, 17, 0.020)  # left_elbow
+    _set_joint_weight(weights, 18, 0.020)  # right_elbow
+    _set_joint_weight(weights, 19, 0.080)  # left_wrist
+    _set_joint_weight(weights, 20, 0.080)  # right_wrist
     return weights
 
 
 def _body_pose_temporal_weights() -> np.ndarray:
+    """Per-joint temporal smoothing weights.
+
+    Higher = more smoothing across frames.  Spine joints are low (Bezier
+    provides geometric stability); hips moderate; upper body highest.
+    body_pose: 0=l_hip 1=r_hip 2=sp1 3=l_knee 4=r_knee 5=sp2 6=l_ankle
+               7=r_ankle 8=sp3 9=l_foot 10=r_foot 11=neck 12=l_collar
+               13=r_collar 14=head 15=l_shoulder 16=r_shoulder 17=l_elbow
+               18=r_elbow 19=l_wrist 20=r_wrist
+    """
     weights = np.ones(63, dtype=np.float32)
-    for joint in (12, 13):           # collar
-        _set_joint_weight(weights, joint, 1.2)
+    for joint in (0, 1):             # hips
+        _set_joint_weight(weights, joint, 0.7)
+    for joint in (2, 5, 8):          # spine — low temporal, Bezier provides shape
+        _set_joint_weight(weights, joint, 0.30)
+    for joint in (3, 4, 6, 7, 9, 10):   # legs
+        _set_joint_weight(weights, joint, 0.65)
+    for joint in (11, 14):           # neck, head
+        _set_joint_weight(weights, joint, 0.8)
+    for joint in (12, 13):           # collars
+        _set_joint_weight(weights, joint, 1.0)
     for joint in (15, 16, 17, 18):   # shoulders, elbows
         _set_joint_weight(weights, joint, 1.2)
     for joint in (19, 20):           # wrists
         _set_joint_weight(weights, joint, 0.8)
-    for joint in (2, 5, 8):          # spine1, spine2, spine3 — Bezier handles
-        _set_joint_weight(weights, joint, 0.5)
-    for joint in (3, 4, 6, 7, 9, 10):   # legs
-        _set_joint_weight(weights, joint, 0.65)
     return weights
 
 
