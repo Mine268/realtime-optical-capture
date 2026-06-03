@@ -78,7 +78,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--calibration-toml", required=True, type=Path)
     parser.add_argument("--video-dir", required=True, type=Path)
     parser.add_argument("--output-dir", type=Path)
-    parser.add_argument("--points-key", default="points_3d", choices=("points_3d", "points_3d_raw"))
+    parser.add_argument("--points-key", default="points_3d_raw", choices=("points_3d", "points_3d_raw"))
     parser.add_argument("--confidence-threshold", type=float, default=0.1)
     parser.add_argument("--frame-limit", type=int, default=0)
     parser.add_argument("--combined-scale", type=float, default=0.5)
@@ -200,14 +200,17 @@ def render_reprojection_overlays(
     calibration_toml: Path,
     video_dir: Path,
     output_dir: Path,
-    points_key: str = "points_3d",
+    points_key: str = "points_3d_raw",
     confidence_threshold: float = 0.1,
     frame_limit: int = 0,
     combined_scale: float = 0.5,
 ) -> None:
     data = np.load(npz_path, allow_pickle=True)
     if points_key not in data.files:
-        raise RuntimeError(f"Missing {points_key} in npz: {npz_path}")
+        if points_key == "points_3d_raw" and "points_3d" in data.files:
+            points_key = "points_3d"
+        else:
+            raise RuntimeError(f"Missing {points_key} in npz: {npz_path}")
 
     camera_serials = [str(serial) for serial in data["camera_serials"]]
     points_3d = data[points_key]

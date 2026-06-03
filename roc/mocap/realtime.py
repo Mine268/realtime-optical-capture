@@ -398,7 +398,6 @@ def run_mocap_realtime(
                     calibration_toml=calibration_toml_path,
                     video_dir=session_paths.videos_dir,
                     output_dir=session_paths.session_dir / "reprojection_videos",
-                    points_key="points_3d",
                     confidence_threshold=0.1,
                     frame_limit=0,
                 )
