@@ -519,7 +519,8 @@ def _install_vposer_stub_if_missing() -> None:
 
 def _load_roc_sequence(npz_path: Path, input_scale: float) -> Any:
     with np.load(npz_path, allow_pickle=True) as data:
-        points_3d = np.asarray(data["points_3d"], dtype=np.float32) * np.float32(input_scale)
+        raw_key = "points_3d_raw" if "points_3d_raw" in data else "points_3d"
+        points_3d = np.asarray(data[raw_key], dtype=np.float32) * np.float32(input_scale)
         landmark_names = [str(name) for name in data["landmark_names"].tolist()]
     return _sequence_from_points(points_3d, input_scale=1.0, landmark_names=landmark_names)
 

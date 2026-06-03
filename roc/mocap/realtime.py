@@ -301,7 +301,7 @@ def run_mocap_realtime(
                                 _last_postprocess_time = frame_start
                                 profile_times["postprocess_s"] += time.perf_counter() - stage_start
                                 stage_start = time.perf_counter()
-                                realtime_retargeter.update(frame_index, processed_points_3d)
+                                realtime_retargeter.update(frame_index, frame_points_3d[0])
                                 profile_times["retarget_s"] += time.perf_counter() - stage_start
 
                             if profile:
