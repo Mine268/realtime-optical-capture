@@ -168,10 +168,10 @@ class RealtimeSmplxTracker:
         # Bezier parameters (learned from fit data, normalized by spine length)
         self._bezier_t = self.T.tensor([0.0, 0.25, 0.50, 0.65, 1.0],
                                         device=self.device, dtype=self.T.float32)
-        self._bezier_p1_along = 0.27   # P1 along fraction
-        self._bezier_p1_perp = 0.24    # P1 perpendicular fraction
-        self._bezier_p2_along = 0.69   # P2 along fraction
-        self._bezier_p2_perp = 0.28    # P2 perpendicular fraction
+        self._bezier_p1_along = 0.25   # P1 along fraction
+        self._bezier_p1_perp = 0.18    # P1 perpendicular fraction
+        self._bezier_p2_along = 0.67   # P2 along fraction
+        self._bezier_p2_perp = 0.22    # P2 perpendicular fraction
 
         # Warm-start state on GPU
         self._prev_bp = self.T.zeros(1, 63, device=self.device)
@@ -725,10 +725,12 @@ def _target_weight(name: str) -> float:
         return 1.05
     if name in {"left_wrist", "right_wrist"}:
         return 0.55
-    if name in {"trunk_center", "neck_center", "head_center"}:
+    if name in {"trunk_center", "neck_center"}:
         return 0.25
-    if name in {"nose", "left_eye", "right_eye", "left_ear", "right_ear", "head_center"}:
-        return 0.35
+    if name == "head_center":
+        return 0.80
+    if name in {"nose", "left_eye", "right_eye", "left_ear", "right_ear"}:
+        return 0.70
     return 1.0
 
 
