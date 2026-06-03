@@ -17,7 +17,7 @@ import smplx
 import torch
 
 from roc.mocap.hybrik_ik import twist_and_swing_ik
-from roc.mocap.joint_mapper import JointMapper, fill_nan_landmarks, load_mapper
+from roc.mocap.joint_mapper import JointMapper, Normalizer, fill_nan_landmarks, load_mapper
 from roc.mocap.retarget import RetargetConfig
 from roc.mocap.track import _save_sequence_npz, _apply_so3_smooth, _write_track_report
 
@@ -47,27 +47,28 @@ class HybrikTracker:
             num_betas=10, num_pca_comps=12,
         ).to(self.device).eval()
 
-        # Load trained joint mapper
-        self.mapper = load_mapper(mapper_checkpoint).to(self.device).eval()
+        # Load trained joint mapper + normalizers
+        self.mapper, self.x_norm, self.y_norm = load_mapper(
+            mapper_checkpoint,
+            xnorm_path=Path("models/joint_mapper_xnorm.pkl"),
+            ynorm_path=Path("models/joint_mapper_ynorm.pkl"),
+            device=self.device,
+        )
 
         self.aggregate: list[dict[str, np.ndarray]] = []
         self._prev_joints: np.ndarray | None = None
 
     def update(self, frame_index: int, points_3d: np.ndarray) -> dict[str, np.ndarray]:
         start = time.perf_counter()
-        input_scale = self.config.input_scale
 
-        # Fill NaN + center
-        single = points_3d[None, ...].astype(np.float32)  # (1, 75, 3) mm
-        filled = fill_nan_landmarks(single)
-        pelvis = (filled[0, 23] + filled[0, 24]) / 2.0  # mid-hip mm
-        centered_m = (filled - pelvis[None, :]) * input_scale  # meters
+        # Map MediaPipe → SMPL-X body joints (with normalization)
+        from roc.mocap.joint_mapper import map_mediapipe_to_smpl
+        smpl_joints_m = map_mediapipe_to_smpl(
+            points_3d[None, ...], self.mapper, self.x_norm, self.y_norm, self.device,
+        )
 
-        # MLP mapper
         with torch.no_grad():
-            x = torch.from_numpy(centered_m).float().to(self.device)
-            smpl_rel = self.mapper(x)  # (1, 22, 3) meters, pelvis-relative
-            smpl_abs = smpl_rel + torch.from_numpy(pelvis[None, None, :] * input_scale).float().to(self.device)
+            smpl_abs = torch.from_numpy(smpl_joints_m).float().to(self.device)
 
             # Twist-and-swing IK
             bp, go, tr = twist_and_swing_ik(smpl_abs, self.smplx_model)
