@@ -76,8 +76,7 @@ def run_mocap_realtime(
     if not calibration_toml_path.is_file():
         raise RuntimeError(f"Calibration toml not found: {calibration_toml_path}")
 
-    if offline_source_dir is None:
-        mocap_session.mkdir(parents=True, exist_ok=True)
+    mocap_session.mkdir(parents=True, exist_ok=True)
 
     capture_config = load_capture_config(capture_config_path)
     session_paths = get_existing_mocap_session(mocap_session)
