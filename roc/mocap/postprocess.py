@@ -70,9 +70,12 @@ class RealtimePostprocessor:
         self._held_values = 0
         self._emitted_frames = 0
 
-    def update(self, points_3d: np.ndarray) -> np.ndarray:
+    def update(self, points_3d: np.ndarray, dt_s: float | None = None) -> np.ndarray:
         if points_3d.shape != (self.num_landmarks, 3):
             raise ValueError(f"Expected points shape {(self.num_landmarks, 3)}, got {points_3d.shape}")
+
+        if dt_s is not None and self.cutoff_hz > 0:
+            self.alpha = _ema_alpha_from_dt(float(dt_s), self.cutoff_hz)
 
         output = np.full_like(points_3d, np.nan, dtype=np.float32)
         valid = np.isfinite(points_3d).all(axis=1)
@@ -150,8 +153,14 @@ def _ema_alpha(fps: float, cutoff_hz: float) -> float:
     if cutoff_hz <= 0:
         return 1.0
     dt = 1.0 / max(fps, 1.0)
+    return _ema_alpha_from_dt(dt, cutoff_hz)
+
+
+def _ema_alpha_from_dt(dt_s: float, cutoff_hz: float) -> float:
+    if cutoff_hz <= 0:
+        return 1.0
     tau = 1.0 / (2.0 * np.pi * cutoff_hz)
-    return float(dt / (tau + dt))
+    return float(dt_s / (tau + dt_s))
 
 
 def _remove_velocity_outliers(points_3d: np.ndarray, threshold_mm: float) -> int:

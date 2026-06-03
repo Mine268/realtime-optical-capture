@@ -188,6 +188,7 @@ def run_mocap_realtime(
                         cv2.namedWindow(preview_window, cv2.WINDOW_NORMAL)
 
                     frame_index = 0
+                    _last_postprocess_time = 0.0
                     with ParallelCapture(cameras) as parallel_cap:
                         while True:
                             frame_start = time.perf_counter()
@@ -295,7 +296,9 @@ def run_mocap_realtime(
                                 frame_points_3d, _ = triangulate_sequence(camera_group, frame_landmarks_2d[:, None, :, :])
                                 profile_times["triangulate_s"] += time.perf_counter() - stage_start
                                 stage_start = time.perf_counter()
-                                processed_points_3d = realtime_postprocessor.update(frame_points_3d[0])
+                                dt_s = frame_start - _last_postprocess_time if _last_postprocess_time > 0 else None
+                                processed_points_3d = realtime_postprocessor.update(frame_points_3d[0], dt_s=dt_s)
+                                _last_postprocess_time = frame_start
                                 profile_times["postprocess_s"] += time.perf_counter() - stage_start
                                 stage_start = time.perf_counter()
                                 realtime_retargeter.update(frame_index, processed_points_3d)
