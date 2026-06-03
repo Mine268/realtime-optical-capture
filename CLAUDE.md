@@ -44,6 +44,7 @@ This is a fixed multi-view real-time optical (markerless) pose estimation system
 | `roc/triangulation/` | `triangulate_sequence()` uses `aniposelib.cameras.CameraGroup.triangulate()` for 3D reconstruction. `cameras.py` handles loading calibration TOML and reordering cameras to match the calibrated order. |
 | `roc/mocap/postprocess.py` | Two postprocessing pipelines: `postprocess_points_3d()` (offline: velocity outlier removal + short-gap interpolation + zero-phase Butterworth) and `RealtimePostprocessor` (online: causal EMA low-pass + brief hold for dropouts). |
 | `roc/mocap/retarget.py` | SMPL-X skeleton fitting. `RealtimeSmplxRetargeter` does per-frame fitting inline during realtime mocap with adaptive root-step selection. `run_mocap_retarget()` does batch fitting for offline mode. Dynamically imports the reference fitting script via `importlib`. |
+| `roc/mocap/track.py` | `RealtimeSmplxTracker`: body-only SMPL-X tracking via Adam optimisation. Composite loss with 11 terms (MSE, priors, knee/elbow angles, axis alignment, Bezier spine, sagittal, pelvis frame, hip/upper-body symmetry). Hyperparameters in `track_config.yaml`. |
 | `roc/io/` | `sessions.py` creates session directory structures. `video.py` provides `H264VideoWriter` (writes MJPG temp file then ffmpeg transcodes to H.264 baseline yuv420p). |
 | `roc/mocap/render_*.py` | Standalone scripts for generating 2D overlay videos, 3D skeleton preview mp4, 3D reprojection diagnostic videos, and SMPL-X reprojection overlays from npz outputs. |
 | `roc/mocap/benchmark_realtime.py` | Standalone benchmarking tool that measures per-model throughput using pre-recorded video. |
@@ -111,6 +112,38 @@ Two modes:
 
 Dependencies (`torch`, `smplx`, `trimesh`, optionally `human_body_prior` for VPoser) are not in `pyproject.toml` — they must be installed separately in the venv before using `--retarget`.
 
+### Track mode architecture (`roc/mocap/track.py`)
+
+`RealtimeSmplxTracker` is a body-only SMPL-X retargeter using vectorised Adam optimisation.  It replaces the full SMPL-X iterative fitting with a lightweight optimisation loop that directly optimises body_pose (63), global_orient (3), and transl (3) via composite loss minimisation.
+
+**Model replacement — SkeletonFK**
+
+The default SMPL-X model computes LBS on 10,475 vertices, even with `return_verts=False`.  A custom `SkeletonFK` module replaces this with pure skeletal forward kinematics (FK): `batch_rodrigues → batch_rigid_transform → joint positions`.  No vertices, no LBS, no blend shapes.  Body joints (0-21) are computed via FK; all other joints (22-126) are derived from nearest body joints with rotation-aware offsets computed from the rest-pose full model.
+
+Speed comparison (CPU, 9 Adam steps):
+
+| Model | Forward | FW+BW | Track FPS |
+|-------|---------|-------|-----------|
+| Full SMPL-X | 5.4ms | 12.5ms | 5.6 |
+| SkeletonFK | 0.3ms | 1.3ms | 17.8 |
+
+FK body joint positions match the full model to 0.0mm at betas=0.  Hand/face landmarks have 2-9mm approximation error (rotated offsets from body joints).  The FK model outputs 127 joints to maintain drop-in compatibility with the tracker's internal joint index mapping.
+
+The FK model is defined in `test/bench_fk_track.py` and injected via `tracker.model = fk_model`.  It is not yet integrated as the default model in `track.py`.
+
+**Hyperparameters** are in `roc/mocap/track_config.yaml`:
+
+| Section | Key params |
+|---------|-----------|
+| `optimizer.learning_rates` | body_pose=0.08, global_orient=0.05, transl=0.03 |
+| `loss_weights` | knee_angle=0.04, bezier=0.12, sagittal=0.12, pelvis_frame=0.20 |
+| `bezier` | p1_perp=0.12, p2_perp=0.16 (spine curvature prior) |
+| `target_weights` | Per-landmark MSE weights (knees 2.3, hips 1.8, wrists 0.55, etc.) |
+| `target_smooth_alpha` | Per-landmark EMA smoothing (all zero — raw 3D positions used) |
+| `post_smooth.sigma` | SO(3) Gaussian filter sigma at save time (0.03) |
+| `body_pose_prior_weights` | Per-joint L2 regularisation |
+| `body_pose_temporal_weights` | Per-joint temporal smoothing |
+
 ### 2D→3D shape conventions
 
 - `pose_2d`: `(num_cameras, num_frames, num_pose_landmarks, 2)` — raw pixel coordinates
@@ -170,10 +203,12 @@ Track mode in `roc/mocap/track.py` uses a composite loss per frame:
 
 **Visual validation**: Render SMPL-X reprojection overlays via `render_smplx_reprojection_overlays()` to compare cyan SMPL-X skeleton against green 2D detections. Common command pattern in `test/bench_*.py` files.
 
-**Smoothing audit**: Six smoothing sources in track pipeline, all reduced from original values:
+**Smoothing audit**: Smoothing in track pipeline has been minimised:
 - `track_temporal_weight`: 0.20→0.05
 - `track_velocity_weight`: 0.02→0.005
 - `track_acceleration_weight`: 0.004→0.002
+- `target_smooth_alpha`: removed entirely (all zero — raw 3D positions used)
+- `post_smooth.sigma`: 0.03 (mild SO(3) Gaussian at save time only)
 - Target EMA (`_target_smooth_alpha`): wrist 0.20→0.05, elbow 0.35→0.10
 - Per-joint temporal weights (`_body_pose_temporal_weights`): collar 2.4→1.2, spine 1.0→0.5, etc.
 - SO(3) save-time Gaussian sigma: 0.30→0.03

@@ -888,7 +888,7 @@ def _horizontal_axis(T: object, axis: object) -> object:
 
 def _target_weight(name: str, tcfg: dict[str, Any]) -> float:
     """Per-landmark MSE weight from track config."""
-    tw = tcfg.get("target_weights", {})
+    tw = tcfg.get("target_weights") or {}
     if name in tw:
         return float(tw[name])
     return 1.0
@@ -896,7 +896,7 @@ def _target_weight(name: str, tcfg: dict[str, Any]) -> float:
 
 def _target_smooth_alpha(name: str, tcfg: dict[str, Any]) -> float:
     """Per-landmark EMA smoothing alpha from track config."""
-    sa = tcfg.get("target_smooth_alpha", {})
+    sa = tcfg.get("target_smooth_alpha") or {}
     if name in sa:
         return float(sa[name])
     return 0.0
