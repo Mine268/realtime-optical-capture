@@ -346,6 +346,11 @@ class RealtimeSmplxTracker:
         self._has_prev_prev = False
         self._prev_target_23: object | None = None
 
+        # Causal EMA smoothing state for realtime postprocessing
+        self._smooth_bp: object | None = None
+        self._smooth_go: object | None = None
+        self._smooth_tr: object | None = None
+
         self.aggregate: list[dict[str, np.ndarray]] = []
 
     # ------------------------------------------------------------------
@@ -371,7 +376,7 @@ class RealtimeSmplxTracker:
         # Track first valid frame index for multi-frame recovery
         if not hasattr(self, '_first_valid_frame'):
             self._first_valid_frame = frame_index
-        early_frames = frame_index <= self._first_valid_frame + 4
+        early_frames = frame_index <= self._first_valid_frame + 7  # 8 recovery frames
 
         # Fresh parameters from warm-start
         bp = self._prev_bp.clone().detach().requires_grad_(True)
@@ -597,6 +602,23 @@ class RealtimeSmplxTracker:
                     f"opt={opt_elapsed*1000:.1f}ms body_err={body_err:.4f}m",
                     flush=True,
                 )
+
+        # Causal EMA postprocessing for realtime stability
+        ema_alpha = float(self._tcfg.get("temporal", {}).get("output_smooth_alpha", 0.12))
+        if ema_alpha > 0:
+            bp_np = result["body_pose"]
+            go_np = result["global_orient"]
+            tr_np = result["transl"]
+            if self._smooth_bp is not None:
+                bp_np = ema_alpha * self._smooth_bp + (1 - ema_alpha) * bp_np
+                go_np = ema_alpha * self._smooth_go + (1 - ema_alpha) * go_np
+                tr_np = ema_alpha * self._smooth_tr + (1 - ema_alpha) * tr_np
+                result["body_pose"] = bp_np.astype(np.float32)
+                result["global_orient"] = go_np.astype(np.float32)
+                result["transl"] = tr_np.astype(np.float32)
+            self._smooth_bp = bp_np.copy()
+            self._smooth_go = go_np.copy()
+            self._smooth_tr = tr_np.copy()
 
         self.aggregate.append(result)
         self._prev_prev_bp = self._prev_bp.clone()
