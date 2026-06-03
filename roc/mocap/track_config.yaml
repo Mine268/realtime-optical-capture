@@ -102,8 +102,8 @@ body_pose_temporal_weights:
   # Per-joint temporal smoothing.  Higher = smoother across frames.
   default: 1.0
   groups:
-    - joints: [0, 1]             # hips — low to escape bad warm-start
-      weight: 0.3
+    - joints: [0, 1]             # hips — moderate to prevent sign drift
+      weight: 0.4
     - joints: [2, 5, 8]          # spine
       weight: 0.30
     - joints: [3, 4, 6, 7, 9, 10]   # legs

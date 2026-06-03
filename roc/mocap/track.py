@@ -404,6 +404,8 @@ class RealtimeSmplxTracker:
             # Boost hip priors 5x during early frames to prevent extreme Y twist
             boosted = _pose_prior_weights.clone()
             boosted[0, 0:6] *= 5.0  # left_hip + right_hip, all 3 axes
+            boosted[0, 1] *= 1.6   # L hip Y: 8x total (5 * 1.6 = 8)
+            boosted[0, 4] *= 1.6   # R hip Y: 8x total
             _pose_prior_weights = boosted
         _temporal_weights = self._temporal_weights
         _smplx_knee_triplets = self._smplx_knee_triplets
