@@ -316,6 +316,7 @@ class RealtimeSmplxTracker:
                 out.joints[0],
                 _smplx_spine_chain,
             )
+            loss = loss + 0.04 * _hip_symmetry_loss(T, bp)
 
             if has_prev:
                 loss = loss + tw * (
@@ -679,7 +680,6 @@ def _spine_sagittal_loss(
         return pred_joints.sum() * 0.0
     spine_dir = spine_dir / spine_len
 
-    # Lateral component of spine1/2/3 relative to the pelvis→neck line
     loss = 0.0
     for i in range(1, 4):
         to_pelvis = spine_pts[i] - pelvis
@@ -693,6 +693,15 @@ def _spine_sagittal_loss(
         lateral = T.dot(dev, lateral_dir)
         loss = loss + lateral.square()
     return loss / 3.0
+
+
+def _hip_symmetry_loss(T: object, body_pose: object) -> object:
+    """Penalise asymmetric left/right hip rotation magnitudes."""
+    l_hip = body_pose[:, 3:6]
+    r_hip = body_pose[:, 6:9]
+    l_norm = T.linalg.norm(l_hip, dim=1)
+    r_norm = T.linalg.norm(r_hip, dim=1)
+    return T.mean((l_norm - r_norm).square())
 
 
 def _horizontal_axis(T: object, axis: object) -> object:
@@ -733,7 +742,10 @@ def _target_smooth_alpha(name: str) -> float:
 
 def _body_pose_prior_weights() -> np.ndarray:
     weights = np.full(63, 0.018, dtype=np.float32)
-    _set_joint_weight(weights, 2, 0.045)   # spine1
+    _set_joint_weight(weights, 0, 0.045)   # pelvis
+    _set_joint_weight(weights, 1, 0.040)   # left_hip
+    _set_joint_weight(weights, 2, 0.040)   # right_hip
+    _set_joint_weight(weights, 3, 0.045)   # spine1
     _set_joint_weight(weights, 5, 0.045)   # spine2
     _set_joint_weight(weights, 8, 0.045)   # spine3
     _set_joint_weight(weights, 11, 0.035)  # neck
