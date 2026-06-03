@@ -322,6 +322,14 @@ class RealtimeSmplxTracker:
         recovery_steps = max(steady_steps, int(self.config.track_recovery_pose_steps))
         # Use recovery steps for first 5 valid frames to escape bad local minima
         n_steps = recovery_steps if early_frames else steady_steps
+
+        # Adaptive: use more steps when target moves rapidly (jump/turn)
+        if not early_frames and has_prev:
+            target_shift = T.norm(target_23[_valid] - self._prev_target_23[_valid]).item()
+            target_scale = T.norm(target_23[_valid]).item() + 1e-6
+            relative_shift = target_shift / target_scale
+            if relative_shift > 0.03:  # significant target movement
+                n_steps = max(n_steps, int(steady_steps * 1.5))
         adapter_elapsed = time.perf_counter() - start
 
         opt_cfg = self._tcfg.get("optimizer", {})
