@@ -40,7 +40,7 @@ axis_weights:
   shoulder: 1.0
 
 post_smooth:
-  sigma: 0.03
+  sigma: 0.0   # disabled — use raw optimization output
 
 target_weights:
   # Per-landmark MSE weights.  Missing landmarks default to 1.0.
@@ -72,10 +72,7 @@ target_weights:
 
 target_smooth_alpha:
   # Per-landmark EMA smoothing.  0.0 = no smoothing.  Missing = 0.0.
-  left_wrist: 0.05
-  right_wrist: 0.05
-  left_elbow: 0.10
-  right_elbow: 0.10
+  # All zero: raw 3D positions used directly, no frame-to-frame EMA.
 
 body_pose_prior_weights:
   # Per-joint L2 regularisation (body_pose ordering, 21 joints).
