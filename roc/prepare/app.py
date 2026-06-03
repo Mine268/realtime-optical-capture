@@ -17,6 +17,7 @@ from roc.io.sessions import PrepareSessionPaths
 from roc.io.sessions import create_prepare_session
 from roc.mvs import MvsCamera
 from roc.mvs import MvsSystem
+from roc.mvs import ParallelCapture
 
 
 @dataclass(slots=True)
@@ -134,8 +135,6 @@ def run_prepare(
     preview_scale: float,
     window_name: str,
 ) -> None:
-    trigger_sleep = 0.0 if fps <= 0 else min(0.1, 0.5 / fps)
-
     with MvsSystem() as mvs:
         devices = mvs.enumerate_devices()
         if not devices:
@@ -181,41 +180,45 @@ def run_prepare(
             latest_frames: dict[str, object] = {}
             empty_rounds = 0
 
-            while True:
-                frames = []
-                labels = []
-                for index, (camera, camera_config) in enumerate(zip(cameras, camera_configs)):
-                    if index == state.selected_index:
-                        camera.apply_manual_capture(
-                            exposure_us=camera_config.exposure_us,
-                            gain_db=camera_config.gain_db,
-                            pixel_format=pixel_format,
-                        )
-                    frame = camera.snapshot(fps_sleep=trigger_sleep)
-                    if frame is None:
-                        continue
-                    camera_config.width = frame.shape[1]
-                    camera_config.height = frame.shape[0]
-                    latest_frames[camera.serial] = frame
-                    frames.append(frame)
-                    labels.append(f"{index + 1}:{camera.serial}")
-
-                if frames:
-                    empty_rounds = 0
-                    preview = _compose_preview(frames, labels, preview_scale)
-                else:
-                    empty_rounds += 1
-                    preview = _make_status_frame(
-                        f"Waiting for camera frames... round={empty_rounds}  press q to quit"
+            with ParallelCapture([(cfg.serial, cam) for cfg, cam in zip(camera_configs, cameras)]) as parallel_cap:
+                while True:
+                    selected_cfg = camera_configs[state.selected_index]
+                    cameras[state.selected_index].apply_manual_capture(
+                        exposure_us=selected_cfg.exposure_us,
+                        gain_db=selected_cfg.gain_db,
+                        pixel_format=pixel_format,
                     )
-                _draw_info(preview, _build_info_panel(camera_configs, state.selected_index))
-                cv2.imshow(window_name, preview)
 
-                key = cv2.waitKey(max(1, int(1000 / max(fps, 1.0)))) & 0xFF
-                if key != 255:
-                    _apply_key(key, state, camera_configs)
-                if state.should_quit:
-                    break
+                    serial_to_frame = parallel_cap.snapshot_all()
+
+                    frames = []
+                    labels = []
+                    for index, (camera, camera_config) in enumerate(zip(cameras, camera_configs)):
+                        frame = serial_to_frame.get(camera_config.serial)
+                        if frame is None:
+                            continue
+                        camera_config.width = frame.shape[1]
+                        camera_config.height = frame.shape[0]
+                        latest_frames[camera_config.serial] = frame
+                        frames.append(frame)
+                        labels.append(f"{index + 1}:{camera_config.serial}")
+
+                    if frames:
+                        empty_rounds = 0
+                        preview = _compose_preview(frames, labels, preview_scale)
+                    else:
+                        empty_rounds += 1
+                        preview = _make_status_frame(
+                            f"Waiting for camera frames... round={empty_rounds}  press q to quit"
+                        )
+                    _draw_info(preview, _build_info_panel(camera_configs, state.selected_index))
+                    cv2.imshow(window_name, preview)
+
+                    key = cv2.waitKey(max(1, int(1000 / max(fps, 1.0)))) & 0xFF
+                    if key != 255:
+                        _apply_key(key, state, camera_configs)
+                    if state.should_quit:
+                        break
 
             cv2.destroyWindow(window_name)
 

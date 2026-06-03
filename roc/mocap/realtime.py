@@ -21,6 +21,7 @@ from roc.mocap.render_reprojection_overlays import render_reprojection_overlays,
 from roc.mocap.retarget import RealtimeSmplxRetargeter, RetargetConfig, RetargetMode
 from roc.mocap.track import RealtimeSmplxTracker
 from roc.mvs import MvsSystem, OfflineMvsSystem
+from roc.mvs import ParallelCapture
 from roc.tracking.mediapipe_tracker import MediapipeTracker
 from roc.tracking.model_paths import hand_model_path, pose_model_path_for_complexity
 from roc.triangulation.cameras import camera_group_names, camera_order_indices, load_camera_group_from_toml
@@ -187,133 +188,136 @@ def run_mocap_realtime(
                         cv2.namedWindow(preview_window, cv2.WINDOW_NORMAL)
 
                     frame_index = 0
-                    while True:
-                        frame_start = time.perf_counter()
-                        profile_times = {
-                            "capture_s": 0.0,
-                            "video_write_s": 0.0,
-                            "pose_s": 0.0,
-                            "hands_s": 0.0,
-                            "append_s": 0.0,
-                            "triangulate_s": 0.0,
-                            "postprocess_s": 0.0,
-                            "retarget_s": 0.0,
-                        }
-                        frame_set_timestamp_ns = time.time_ns()
-                        frame_set_pose = []
-                        frame_set_pose_conf = []
-                        frame_set_left = []
-                        frame_set_left_conf = []
-                        frame_set_right = []
-                        frame_set_right_conf = []
-                        frame_set_bbox = []
-                        preview_frames = []
-                        timestamp_ms = frame_index * int(1000 / max(fps, 1.0))
+                    with ParallelCapture(cameras) as parallel_cap:
+                        while True:
+                            frame_start = time.perf_counter()
+                            profile_times = {
+                                "capture_s": 0.0,
+                                "video_write_s": 0.0,
+                                "pose_s": 0.0,
+                                "hands_s": 0.0,
+                                "append_s": 0.0,
+                                "triangulate_s": 0.0,
+                                "postprocess_s": 0.0,
+                                "retarget_s": 0.0,
+                            }
+                            frame_set_timestamp_ns = time.time_ns()
+                            frame_set_pose = []
+                            frame_set_pose_conf = []
+                            frame_set_left = []
+                            frame_set_left_conf = []
+                            frame_set_right = []
+                            frame_set_right_conf = []
+                            frame_set_bbox = []
+                            preview_frames = []
+                            timestamp_ms = frame_index * int(1000 / max(fps, 1.0))
 
-                        for serial, camera in cameras:
                             stage_start = time.perf_counter()
-                            frame = camera.snapshot(fps_sleep=min(0.1, 0.5 / max(fps, 1.0)))
+                            serial_to_frame = parallel_cap.snapshot_all()
                             profile_times["capture_s"] += time.perf_counter() - stage_start
-                            if frame is None:
-                                raise RuntimeError(f"No frame received for camera {serial}")
 
-                            if record_session_videos and serial not in writers:
-                                temp_path = session_paths.videos_dir / f"{serial}.capture_tmp.avi"
-                                temp_video_paths[serial] = temp_path
-                                writers[serial] = build_temp_video_writer(
-                                    temp_path,
-                                    frame.shape[1],
-                                    frame.shape[0],
-                                    fps,
-                                )
-                            if record_session_videos:
+                            for serial, camera in cameras:
+                                frame = serial_to_frame.get(serial)
+                                if frame is None:
+                                    raise RuntimeError(f"No frame received for camera {serial}")
+
+                                if record_session_videos and serial not in writers:
+                                    temp_path = session_paths.videos_dir / f"{serial}.capture_tmp.avi"
+                                    temp_video_paths[serial] = temp_path
+                                    writers[serial] = build_temp_video_writer(
+                                        temp_path,
+                                        frame.shape[1],
+                                        frame.shape[0],
+                                        fps,
+                                    )
+                                if record_session_videos:
+                                    stage_start = time.perf_counter()
+                                    writers[serial].write(frame)
+                                    profile_times["video_write_s"] += time.perf_counter() - stage_start
+
+                                tracker = trackers[serial]
                                 stage_start = time.perf_counter()
-                                writers[serial].write(frame)
-                                profile_times["video_write_s"] += time.perf_counter() - stage_start
+                                pose_result = tracker.detect_pose(frame, timestamp_ms=timestamp_ms)
+                                profile_times["pose_s"] += time.perf_counter() - stage_start
+                                stage_start = time.perf_counter()
+                                hand_result = tracker.detect_hands(frame, timestamp_ms=timestamp_ms)
+                                profile_times["hands_s"] += time.perf_counter() - stage_start
+                                valid = ~np.isnan(pose_result.xy[:, 0])
+                                if np.any(valid):
+                                    xy = pose_result.xy[valid]
+                                    x0, y0 = np.min(xy, axis=0)
+                                    x1, y1 = np.max(xy, axis=0)
+                                    bbox = np.array([x0, y0, x1, y1], dtype=np.float32)
+                                else:
+                                    bbox = np.array([np.nan, np.nan, np.nan, np.nan], dtype=np.float32)
 
-                            tracker = trackers[serial]
+                                frame_set_pose.append(pose_result.xy)
+                                frame_set_pose_conf.append(pose_result.confidence)
+                                frame_set_left.append(hand_result.left_xy)
+                                frame_set_left_conf.append(hand_result.left_confidence)
+                                frame_set_right.append(hand_result.right_xy)
+                                frame_set_right_conf.append(hand_result.right_confidence)
+                                frame_set_bbox.append(bbox)
+
+                                if show_preview:
+                                    overlay = frame.copy()
+                                    for point in pose_result.xy:
+                                        if not np.isnan(point[0]):
+                                            cv2.circle(overlay, (int(point[0]), int(point[1])), 2, (0, 255, 0), -1)
+                                    preview_frames.append(overlay)
+
                             stage_start = time.perf_counter()
-                            pose_result = tracker.detect_pose(frame, timestamp_ms=timestamp_ms)
-                            profile_times["pose_s"] += time.perf_counter() - stage_start
-                            stage_start = time.perf_counter()
-                            hand_result = tracker.detect_hands(frame, timestamp_ms=timestamp_ms)
-                            profile_times["hands_s"] += time.perf_counter() - stage_start
-                            valid = ~np.isnan(pose_result.xy[:, 0])
-                            if np.any(valid):
-                                xy = pose_result.xy[valid]
-                                x0, y0 = np.min(xy, axis=0)
-                                x1, y1 = np.max(xy, axis=0)
-                                bbox = np.array([x0, y0, x1, y1], dtype=np.float32)
-                            else:
-                                bbox = np.array([np.nan, np.nan, np.nan, np.nan], dtype=np.float32)
+                            timestamps.append(timestamp_ms)
+                            pose_2d.append(np.stack(frame_set_pose, axis=0))
+                            pose_conf.append(np.stack(frame_set_pose_conf, axis=0))
+                            left_hand_2d.append(np.stack(frame_set_left, axis=0))
+                            left_hand_conf.append(np.stack(frame_set_left_conf, axis=0))
+                            right_hand_2d.append(np.stack(frame_set_right, axis=0))
+                            right_hand_conf.append(np.stack(frame_set_right_conf, axis=0))
+                            bboxes.append(np.stack(frame_set_bbox, axis=0))
+                            frame_timestamps_ns.append(frame_set_timestamp_ns)
+                            profile_times["append_s"] += time.perf_counter() - stage_start
 
-                            frame_set_pose.append(pose_result.xy)
-                            frame_set_pose_conf.append(pose_result.confidence)
-                            frame_set_left.append(hand_result.left_xy)
-                            frame_set_left_conf.append(hand_result.left_confidence)
-                            frame_set_right.append(hand_result.right_xy)
-                            frame_set_right_conf.append(hand_result.right_confidence)
-                            frame_set_bbox.append(bbox)
+                            if realtime_postprocessor is not None and realtime_retargeter is not None:
+                                stage_start = time.perf_counter()
+                                frame_pose_np = np.stack(frame_set_pose, axis=0).astype(np.float32)[reorder_indices]
+                                frame_pose_conf_np = np.stack(frame_set_pose_conf, axis=0).astype(np.float32)[reorder_indices]
+                                frame_left_np = np.stack(frame_set_left, axis=0).astype(np.float32)[reorder_indices]
+                                frame_left_conf_np = np.stack(frame_set_left_conf, axis=0).astype(np.float32)[reorder_indices]
+                                frame_right_np = np.stack(frame_set_right, axis=0).astype(np.float32)[reorder_indices]
+                                frame_right_conf_np = np.stack(frame_set_right_conf, axis=0).astype(np.float32)[reorder_indices]
+                                frame_landmarks_2d = np.concatenate([frame_pose_np, frame_left_np, frame_right_np], axis=1)
+                                frame_conf = np.concatenate(
+                                    [frame_pose_conf_np, frame_left_conf_np, frame_right_conf_np],
+                                    axis=1,
+                                )
+                                frame_landmarks_2d = np.where(frame_conf[..., None] <= 0.1, np.nan, frame_landmarks_2d)
+                                frame_points_3d, _ = triangulate_sequence(camera_group, frame_landmarks_2d[:, None, :, :])
+                                profile_times["triangulate_s"] += time.perf_counter() - stage_start
+                                stage_start = time.perf_counter()
+                                processed_points_3d = realtime_postprocessor.update(frame_points_3d[0])
+                                profile_times["postprocess_s"] += time.perf_counter() - stage_start
+                                stage_start = time.perf_counter()
+                                realtime_retargeter.update(frame_index, processed_points_3d)
+                                profile_times["retarget_s"] += time.perf_counter() - stage_start
 
-                            if show_preview:
-                                overlay = frame.copy()
-                                for point in pose_result.xy:
-                                    if not np.isnan(point[0]):
-                                        cv2.circle(overlay, (int(point[0]), int(point[1])), 2, (0, 255, 0), -1)
-                                preview_frames.append(overlay)
+                            if profile:
+                                profile_times["frame_total_s"] = time.perf_counter() - frame_start
+                                print(_format_estimate_profile_line(frame_index, profile_times), flush=True)
 
-                        stage_start = time.perf_counter()
-                        timestamps.append(timestamp_ms)
-                        pose_2d.append(np.stack(frame_set_pose, axis=0))
-                        pose_conf.append(np.stack(frame_set_pose_conf, axis=0))
-                        left_hand_2d.append(np.stack(frame_set_left, axis=0))
-                        left_hand_conf.append(np.stack(frame_set_left_conf, axis=0))
-                        right_hand_2d.append(np.stack(frame_set_right, axis=0))
-                        right_hand_conf.append(np.stack(frame_set_right_conf, axis=0))
-                        bboxes.append(np.stack(frame_set_bbox, axis=0))
-                        frame_timestamps_ns.append(frame_set_timestamp_ns)
-                        profile_times["append_s"] += time.perf_counter() - stage_start
+                            if frame_index % 25 == 0:
+                                print(f"Processed frame set {frame_index}")
 
-                        if realtime_postprocessor is not None and realtime_retargeter is not None:
-                            stage_start = time.perf_counter()
-                            frame_pose_np = np.stack(frame_set_pose, axis=0).astype(np.float32)[reorder_indices]
-                            frame_pose_conf_np = np.stack(frame_set_pose_conf, axis=0).astype(np.float32)[reorder_indices]
-                            frame_left_np = np.stack(frame_set_left, axis=0).astype(np.float32)[reorder_indices]
-                            frame_left_conf_np = np.stack(frame_set_left_conf, axis=0).astype(np.float32)[reorder_indices]
-                            frame_right_np = np.stack(frame_set_right, axis=0).astype(np.float32)[reorder_indices]
-                            frame_right_conf_np = np.stack(frame_set_right_conf, axis=0).astype(np.float32)[reorder_indices]
-                            frame_landmarks_2d = np.concatenate([frame_pose_np, frame_left_np, frame_right_np], axis=1)
-                            frame_conf = np.concatenate(
-                                [frame_pose_conf_np, frame_left_conf_np, frame_right_conf_np],
-                                axis=1,
-                            )
-                            frame_landmarks_2d = np.where(frame_conf[..., None] <= 0.1, np.nan, frame_landmarks_2d)
-                            frame_points_3d, _ = triangulate_sequence(camera_group, frame_landmarks_2d[:, None, :, :])
-                            profile_times["triangulate_s"] += time.perf_counter() - stage_start
-                            stage_start = time.perf_counter()
-                            processed_points_3d = realtime_postprocessor.update(frame_points_3d[0])
-                            profile_times["postprocess_s"] += time.perf_counter() - stage_start
-                            stage_start = time.perf_counter()
-                            realtime_retargeter.update(frame_index, processed_points_3d)
-                            profile_times["retarget_s"] += time.perf_counter() - stage_start
+                            if show_preview and preview_frames:
+                                preview = cv2.hconcat(preview_frames)
+                                cv2.imshow(preview_window, preview)
+                                key = cv2.waitKey(1) & 0xFF
+                                if key == ord("q"):
+                                    break
 
-                        if profile:
-                            profile_times["frame_total_s"] = time.perf_counter() - frame_start
-                            print(_format_estimate_profile_line(frame_index, profile_times), flush=True)
-
-                        if frame_index % 25 == 0:
-                            print(f"Processed frame set {frame_index}")
-
-                        if show_preview and preview_frames:
-                            preview = cv2.hconcat(preview_frames)
-                            cv2.imshow(preview_window, preview)
-                            key = cv2.waitKey(1) & 0xFF
-                            if key == ord("q"):
+                            frame_index += 1
+                            if max_frames > 0 and frame_index >= max_frames:
                                 break
-
-                        frame_index += 1
-                        if max_frames > 0 and frame_index >= max_frames:
-                            break
                 finally:
                     if show_preview:
                         cv2.destroyAllWindows()

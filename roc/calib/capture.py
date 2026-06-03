@@ -12,6 +12,7 @@ from roc.io.video import build_mjpg_writer, encode_h264_mp4
 from roc.io.sessions import create_calibration_session
 from roc.calib.solve import run_calibration_solve
 from roc.mvs import MvsSystem
+from roc.mvs import ParallelCapture
 
 
 def _build_video_writer(path: Path, frame_width: int, frame_height: int, fps: float) -> cv2.VideoWriter:
@@ -90,7 +91,6 @@ def run_calibration_capture(
         cameras = []
         writers = {}
         final_video_paths = {}
-        trigger_sleep = 0.0 if fps <= 0 else min(0.1, 0.5 / fps)
 
         try:
             for serial in ordered_serials:
@@ -110,44 +110,47 @@ def run_calibration_capture(
             if show_preview:
                 cv2.namedWindow(preview_window, cv2.WINDOW_NORMAL)
 
-            for frame_index in range(frames):
-                preview_frames = []
-                for serial, camera, camera_cfg in cameras:
-                    frame = camera.snapshot(fps_sleep=trigger_sleep)
-                    if frame is None:
-                        print(f"[warn] no frame for camera {serial} at frame {frame_index}")
-                        continue
+            with ParallelCapture([(serial, cam) for serial, cam, _ in cameras]) as parallel_cap:
+                for frame_index in range(frames):
+                    preview_frames = []
+                    serial_to_frame = parallel_cap.snapshot_all()
 
-                    if serial not in writers:
-                        final_video_path = session_paths.videos_dir / f"{serial}.mp4"
-                        temp_video_path = final_video_path.with_name(final_video_path.stem + ".capture_tmp.avi")
-                        writer = _build_video_writer(
-                            temp_video_path,
-                            frame.shape[1],
-                            frame.shape[0],
-                            fps,
-                        )
-                        writers[serial] = writer
-                        final_video_paths[serial] = (temp_video_path, final_video_path)
-                        camera_cfg.width = frame.shape[1]
-                        camera_cfg.height = frame.shape[0]
+                    for serial, camera, camera_cfg in cameras:
+                        frame = serial_to_frame.get(serial)
+                        if frame is None:
+                            print(f"[warn] no frame for camera {serial} at frame {frame_index}")
+                            continue
 
-                    writers[serial].write(frame)
-                    if show_preview:
-                        annotated = frame.copy()
-                        cv2.putText(
-                            annotated,
-                            f"{serial} frame={frame_index + 1}/{frames}",
-                            (12, 28),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.8,
-                            (0, 255, 255),
-                            2,
-                            cv2.LINE_AA,
-                        )
-                        preview_frames.append(annotated)
+                        if serial not in writers:
+                            final_video_path = session_paths.videos_dir / f"{serial}.mp4"
+                            temp_video_path = final_video_path.with_name(final_video_path.stem + ".capture_tmp.avi")
+                            writer = _build_video_writer(
+                                temp_video_path,
+                                frame.shape[1],
+                                frame.shape[0],
+                                fps,
+                            )
+                            writers[serial] = writer
+                            final_video_paths[serial] = (temp_video_path, final_video_path)
+                            camera_cfg.width = frame.shape[1]
+                            camera_cfg.height = frame.shape[0]
 
-                print(f"Captured calibration frame set {frame_index + 1}/{frames}")
+                        writers[serial].write(frame)
+                        if show_preview:
+                            annotated = frame.copy()
+                            cv2.putText(
+                                annotated,
+                                f"{serial} frame={frame_index + 1}/{frames}",
+                                (12, 28),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.8,
+                                (0, 255, 255),
+                                2,
+                                cv2.LINE_AA,
+                            )
+                            preview_frames.append(annotated)
+
+                    print(f"Captured calibration frame set {frame_index + 1}/{frames}")
 
                 if show_preview and preview_frames:
                     preview = cv2.hconcat(preview_frames)
