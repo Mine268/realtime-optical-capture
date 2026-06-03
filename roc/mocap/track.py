@@ -527,6 +527,11 @@ class RealtimeSmplxTracker:
                 tgt_hip_r_idx=_target_hip_r,
             )
             loss = loss + float(lw.get("hip_symmetry", 0.0)) * _hip_symmetry_loss(T, bp)
+            loss = loss + float(lw.get("hip_direction_angle", 0.10)) * _hip_direction_angle_loss(
+                T, out.joints[0], target_full,
+                self._smplx_hip_l_idx, self._smplx_hip_r_idx,
+                _target_hip_l, _target_hip_r,
+            )
             loss = loss + float(lw.get("upper_body_symmetry", 0.003)) * _upper_body_symmetry_loss(T, bp)
             loss = loss + float(lw.get("pelvis_frame", 0.20)) * _pelvis_frame_loss(
                 T,
@@ -961,6 +966,38 @@ def _hip_symmetry_loss(T: object, body_pose: object) -> object:
     l_norm = T.linalg.norm(l_hip, dim=1)
     r_norm = T.linalg.norm(r_hip, dim=1)
     return T.mean((l_norm - r_norm).square())
+
+
+def _hip_direction_angle_loss(
+    T: object,
+    pred_joints: object,
+    target_points: object,
+    smplx_lh_idx: int,
+    smplx_rh_idx: int,
+    tgt_lh_idx: int,
+    tgt_rh_idx: int,
+) -> object:
+    """Penalise angular deviation between SMPL-X and target hip direction vectors."""
+    pred_lh = pred_joints[smplx_lh_idx]
+    pred_rh = pred_joints[smplx_rh_idx]
+    tgt_lh = target_points[tgt_lh_idx]
+    tgt_rh = target_points[tgt_rh_idx]
+
+    valid = (T.isfinite(tgt_lh).all() & T.isfinite(tgt_rh).all())
+    if not bool(valid):
+        return pred_joints.sum() * 0.0
+
+    pred_vec = pred_rh - pred_lh
+    tgt_vec = tgt_rh - tgt_lh
+
+    # Cosine similarity of the 3D hip direction vectors
+    pred_norm = T.linalg.norm(pred_vec)
+    tgt_norm = T.linalg.norm(tgt_vec)
+    if pred_norm < 1e-8 or tgt_norm < 1e-8:
+        return pred_joints.sum() * 0.0
+
+    cos = T.dot(pred_vec, tgt_vec) / (pred_norm * tgt_norm)
+    return 1.0 - cos
 
 
 def _upper_body_symmetry_loss(T: object, body_pose: object) -> object:

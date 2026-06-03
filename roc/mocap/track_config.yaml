@@ -12,13 +12,14 @@ loss_weights:
   knee_angle: 0.04
   elbow_angle: 0.03
   elbow_max_segment_m: 0.40
-  axis_alignment: 0.10
+  axis_alignment: 0.15
   shoulder_line: 0.08
   spine_bezier: 0.20
   spine_sagittal: 0.18
   hip_symmetry: 0.0   # disabled — natural hip motion is asymmetric during turns
+  hip_direction_angle: 0.10   # penalise SMPL-X vs target hip direction angular deviation
   upper_body_symmetry: 0.003   # soft symmetry on collars/shoulders/elbows
-  pelvis_frame: 0.20
+  pelvis_frame: 0.25
 
 temporal:
   global_orient_scale: 0.5   # relative to body_pose temporal weight
