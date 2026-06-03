@@ -388,7 +388,7 @@ class RealtimeSmplxTracker:
                 _smplx_shoulder_idx,
                 _target_shoulder_idx,
             )
-            loss = loss + float(lw.get("spine_bezier", 0.12)) * _spine_bezier_loss(
+            loss = loss + float(lw.get("spine_bezier", 0.20)) * _spine_bezier_loss(
                 T,
                 out.joints[0],
                 target_full,
@@ -402,7 +402,7 @@ class RealtimeSmplxTracker:
                 p2_along=self._bezier_p2_along,
                 p2_perp=self._bezier_p2_perp,
             )
-            loss = loss + float(lw.get("spine_sagittal", 0.12)) * _spine_sagittal_loss(
+            loss = loss + float(lw.get("spine_sagittal", 0.18)) * _spine_sagittal_loss(
                 T,
                 out.joints[0],
                 _smplx_spine_chain,
