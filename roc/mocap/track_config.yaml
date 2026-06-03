@@ -17,7 +17,7 @@ loss_weights:
   spine_bezier: 0.20
   spine_sagittal: 0.18
   hip_symmetry: 0.0   # disabled — natural hip motion is asymmetric during turns
-  hip_direction_angle: 0.10   # penalise SMPL-X vs target hip direction angular deviation
+  hip_direction_angle: 0.0   # disabled — can pull pelvis wrong direction during turns
   upper_body_symmetry: 0.003   # soft symmetry on collars/shoulders/elbows
   pelvis_frame: 0.25
 

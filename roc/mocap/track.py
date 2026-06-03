@@ -192,6 +192,7 @@ class RealtimeSmplxTracker:
         body_smplx_map.setdefault("left_shoulder", "left_shoulder")
         body_smplx_map.setdefault("right_shoulder", "right_shoulder")
         body_idx = {name: i for i, name in enumerate(BODY_NAMES)}
+        self._body_idx = body_idx
         src_l, tgt_l = [], []
         target_names = []
         for bn, sn in body_smplx_map.items():
@@ -402,6 +403,28 @@ class RealtimeSmplxTracker:
         _betas = self.shared_betas
         tw = self.config.track_temporal_weight  # default 0.05 — light smoothing, Bezier spine provides stability
         _target_weights = self._target_weights
+        _target_names = self._target_names
+        _target_weights_adj = _target_weights.clone()
+        _hip_flip_detected = False
+        if has_prev and getattr(self, '_prev_smplx_lh', None) is not None:
+            tgt_hl_np = scaled[self._body_idx["left_hip"]]
+            tgt_hr_np = scaled[self._body_idx["right_hip"]]
+            if np.isfinite(tgt_hl_np).all() and np.isfinite(tgt_hr_np).all():
+                cur_dir = tgt_hr_np - tgt_hl_np
+                prev_dir = self._prev_smplx_rh - self._prev_smplx_lh
+                # Detect hip direction inconsistency: target vs SMPL-X prediction
+                cdot = float(np.dot(cur_dir[:2], prev_dir[:2]))  # XY-plane dot product
+                cn2 = float(np.linalg.norm(cur_dir[:2])) * float(np.linalg.norm(prev_dir[:2])) + 1e-8
+                cos_xy = cdot / cn2
+                if cos_xy < 0.3:  # >~70° deviation in XY plane
+                    _hip_flip_detected = True
+                    hip_names = {"left_hip", "right_hip", "hips_center", "left_knee", "right_knee",
+                                 "left_ankle", "right_ankle", "left_heel", "right_heel",
+                                 "left_foot_index", "right_foot_index"}
+                    for name_idx, nm in enumerate(_target_names):
+                        if nm in hip_names:
+                            _target_weights_adj[name_idx] *= 0.05
+
         _pose_prior_weights = self._pose_prior_weights
         if early_frames:
             # Boost hip priors 5x during early frames to prevent extreme Y twist
@@ -470,7 +493,7 @@ class RealtimeSmplxTracker:
             )
             pred_pts = out.joints[0, _src]
             diffs = pred_pts[_valid] - _tgt[_valid]
-            valid_weights = _target_weights[_valid]
+            valid_weights = _target_weights_adj[_valid]
             loss = (valid_weights[:, None] * diffs.square()).sum() / (3.0 * valid_weights.sum().clamp_min(1e-6))
 
             loss = loss + T.mean(_pose_prior_weights * bp.square())
@@ -550,6 +573,13 @@ class RealtimeSmplxTracker:
                     + go_scale * T.mean((go - p_go) ** 2)
                     + tr_scale * T.mean((tr - p_tr) ** 2)
                 )
+                # Soft pelvis rotation clamp when hip detection is unreliable
+                if _hip_flip_detected:
+                    go_delta = T.norm(go - p_go)
+                    go_threshold = 0.26  # ~15°
+                    excess = T.clamp(go_delta - go_threshold, min=0)
+                    if excess > 0:
+                        loss = loss + 0.3 * excess.square()
             if has_pp:
                 vw = self.config.track_velocity_weight
                 if vw > 0:
@@ -638,6 +668,8 @@ class RealtimeSmplxTracker:
         self._prev_go = go.detach().clone()
         self._prev_tr = tr.detach().clone()
         self._prev_target_23 = target_23.detach().clone()
+        self._prev_smplx_lh = joints[0, 1, :].copy()  # SMPL-X left_hip
+        self._prev_smplx_rh = joints[0, 2, :].copy()  # SMPL-X right_hip
         self._has_prev = True
         self._has_prev_prev = has_prev
 
