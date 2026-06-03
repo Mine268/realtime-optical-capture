@@ -125,11 +125,27 @@ Speed comparison (CPU, 9 Adam steps):
 | Model | Forward | FW+BW | Track FPS |
 |-------|---------|-------|-----------|
 | Full SMPL-X | 5.4ms | 12.5ms | 5.6 |
-| SkeletonFK | 0.3ms | 1.3ms | 17.8 |
+| SkeletonFK (eager) | 0.3ms | 1.3ms | 17.8 |
+| SkeletonFK + torch.compile | 0.4ms | 1.4ms | **30+** |
+
+With `torch.compile(mode="default")`, the FK model achieves 1.4ms FW+BW per step (3.9x over eager), enabling 30 Adam steps at 10.1 FPS with 50.7mm body error — matching the fit baseline noise floor (50.0mm self-reported error).
 
 FK body joint positions match the full model to 0.0mm at betas=0.  Hand/face landmarks have 2-9mm approximation error (rotated offsets from body joints).  The FK model outputs 127 joints to maintain drop-in compatibility with the tracker's internal joint index mapping.
 
 The FK model is defined in `test/bench_fk_track.py` and injected via `tracker.model = fk_model`.  It is not yet integrated as the default model in `track.py`.
+
+### Accuracy noise floor
+
+The fit baseline (`RealtimeSmplxRetargeter`) has a self-reported body error of **50mm** vs the triangulated 3D points.  This is the irreducible noise floor from triangulation noise (~28mm median frame-to-frame for hips).  Track accuracy cannot exceed this floor.
+
+Track vs fit body error comparison (body joints 0-21, mm):
+
+| Config | Steps | FPS | Self err | vs Fit |
+|--------|-------|-----|----------|--------|
+| FK eager | 15 | 9.8 | 61mm | 51mm |
+| FK + compile | 25 | **12.1** | 54mm | 49mm |
+| FK + compile | 30 | **10.1** | **51mm** | 45mm |
+| Fit (reference) | 120+ | 2.6 | 50mm | 0 |
 
 **Hyperparameters** are in `roc/mocap/track_config.yaml`:
 
