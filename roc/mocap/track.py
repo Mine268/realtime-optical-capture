@@ -311,12 +311,12 @@ class RealtimeSmplxTracker:
                 _target_hip_l,
                 _target_hip_r,
             )
-            loss = loss + 0.06 * _spine_sagittal_loss(
+            loss = loss + 0.10 * _spine_sagittal_loss(
                 T,
                 out.joints[0],
                 _smplx_spine_chain,
             )
-            loss = loss + 0.04 * _hip_symmetry_loss(T, bp)
+            loss = loss + 0.06 * _hip_symmetry_loss(T, bp)
 
             if has_prev:
                 loss = loss + tw * (
@@ -744,9 +744,12 @@ def _target_smooth_alpha(name: str) -> float:
 
 def _body_pose_prior_weights() -> np.ndarray:
     weights = np.full(63, 0.018, dtype=np.float32)
-    _set_joint_weight(weights, 0, 0.045)   # pelvis
-    _set_joint_weight(weights, 1, 0.040)   # left_hip
-    _set_joint_weight(weights, 2, 0.040)   # right_hip
+    _set_joint_weight(weights, 0, 0.060)   # pelvis — rigid anchor
+    _set_joint_weight(weights, 1, 0.050)   # left_hip — part of pelvis rigid body
+    _set_joint_weight(weights, 2, 0.050)   # right_hip
+    # Extra: penalise hip Y (twist) more than XY bending
+    weights[4] *= 3.0   # left_hip Y: 0.150 — femur twist is unnatural
+    weights[7] *= 3.0   # right_hip Y: 0.150
     _set_joint_weight(weights, 3, 0.045)   # spine1
     _set_joint_weight(weights, 5, 0.045)   # spine2
     _set_joint_weight(weights, 8, 0.045)   # spine3

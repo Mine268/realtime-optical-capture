@@ -130,3 +130,65 @@ Dependencies (`torch`, `smplx`, `trimesh`, optionally `human_body_prior` for VPo
 - VPoser model files in `models/vposer_v1_0/` (not committed; required for `--retarget-use-vposer`)
 - GPU delegate requires working EGL/OpenGL context (currently non-functional in this environment)
 - SMPL-X retargeting requires `torch`, `smplx`, `trimesh` in the venv (not managed by pyproject.toml)
+
+### Track vs Fit modes
+
+| | Track (RealtimeSmplxTracker) | Fit (RealtimeSmplxRetargeter) |
+|---|---|---|
+| Optimizer | Adam inline (hand-written loop) | Reference fitter's `fit_single_frame` |
+| Steps | 18 steady / 60 recovery | ~2-30 root + ~120 pose + ~170 lower-body refine |
+| Speed | ~150ms (6.3 FPS GPU) | ~390ms (2.6 FPS GPU) |
+| Hands/Betas | Frozen to zero | Configurable |
+| Input | Raw triangulated `points_3d_raw` | Same (since fix) |
+| Save smoothing | SO(3) Gaussian σ=0.03 | None |
+
+### Track mode loss function
+
+Track mode in `roc/mocap/track.py` uses a composite loss per frame:
+
+1. **Weighted joint MSE** — per-landmark weights in `_target_weight()`: knees 2.3×, hips 1.8×, shoulders 1.7×, elbows 1.05×, wrists 0.55×, face landmarks 0.70×, head_center 0.80×, derived centers 0.25×
+2. **Pose prior** — per-joint L2 on body_pose via `_body_pose_prior_weights()`: pelvis/hips 0.050-0.060, spine 0.045, knees 0.010, ankles 0.010, wrists 0.120. Hip Y (femur twist) weighted 3× higher (0.150)
+3. **Knee angle loss** (0.08) — cosine similarity of hip-knee-ankle triplets
+4. **Elbow angle loss** (0.04) — same for shoulder-elbow-wrist, gated by limb length ≤0.40m
+5. **Hip/shoulder axis alignment** (0.10) — horizontal axis directions in XY plane
+6. **Shoulder line loss** (0.08) — point-to-line distance from SMPL-X shoulders to MediaPipe shoulder line
+7. **Spine Bezier** (0.12) — cubic Bezier anchored by pelvis→neck, control points from fit data (p1_perp=0.08, p2_perp=0.12)
+8. **Spine sagittal** (0.10) — penalises lateral (left-right) spine bending via hip axis reference
+9. **Hip symmetry** (0.06) — penalises L/R hip rotation magnitude asymmetry
+10. **Temporal** (tw=0.05) — body_pose, global_orient, transl consistency with previous frame, per-joint weights in `_body_pose_temporal_weights()`
+11. **Velocity** (0.005) / **Acceleration** (0.002) damping — 2nd/3rd order finite difference
+
+### Key track evaluation techniques
+
+**Per-joint error vs fit baseline**: Load both track and fit `smplx_fit_sequence.npz`, extract `smplx_joints[:, :22] / input_scale` (first 22 SMPL-X body joints in mm), align by `frame_indices`, compute per-joint Euclidean distance. Use `test/compare_track_fit.py`.
+
+**Spine curvature**: Compute spine joint positions from `smplx_joints` indices [0,3,6,9,12], measure max angle between consecutive bone segments. Track should stay within ±5° of fit.
+
+**Pelvis/hip stability**: Check body_pose axis-angle norms for joints 0 (pelvis), 1 (left_hip), 2 (right_hip). High Y-component (>500 mrad) indicates femur twist. Compare against fit's per-joint axis-angle distributions.
+
+**Input data source**: Always use `points_3d_raw` (triangulated, no filtering) for retargeting. `points_3d` in NPZ is EMA-filtered with a lag of ~1 frame at low FPS. The batch fit loader `_load_roc_sequence` and realtime loop were both fixed to use raw.
+
+**Visual validation**: Render SMPL-X reprojection overlays via `render_smplx_reprojection_overlays()` to compare cyan SMPL-X skeleton against green 2D detections. Common command pattern in `test/bench_*.py` files.
+
+**Smoothing audit**: Six smoothing sources in track pipeline, all reduced from original values:
+- `track_temporal_weight`: 0.20→0.05
+- `track_velocity_weight`: 0.02→0.005
+- `track_acceleration_weight`: 0.004→0.002
+- Target EMA (`_target_smooth_alpha`): wrist 0.20→0.05, elbow 0.35→0.10
+- Per-joint temporal weights (`_body_pose_temporal_weights`): collar 2.4→1.2, spine 1.0→0.5, etc.
+- SO(3) save-time Gaussian sigma: 0.30→0.03
+
+### Bezier spine prior
+
+Learned from fit data across 3 sessions (300 frames). The spine chain (pelvis→spine1→spine2→spine3→neck) follows a cubic Bezier with pelvis and neck as anchors. Control points:
+- P1: 25% along spine, 8% forward perpendicular bend
+- P2: 67% along spine, 12% forward perpendicular bend
+
+Values were reduced from initial 27%/24% and 69%/28% (learned from all-fit average including forward-leaning poses) to prevent over-curvature in standing/walking frames. The forward direction is computed as `cross(hip_axis, spine_vector)`.
+
+### Known issues and mitigations
+
+- **GPU NaN in fit mode**: `alignment_rotation()` in the reference fitter divides by zero when foot landmarks are NaN (filled to 0.0). Fixed with zero-norm guards.
+- **EMA lag in postprocessor**: `RealtimePostprocessor` was using configured `--fps` (e.g. 30) instead of actual FPS (~5.7), causing effective cutoff to drop from 1.2Hz to 0.23Hz. Fixed with per-frame `dt_s` parameter.
+- **Spine over-curvature**: Bezier perp values must be tuned per-session. Too high causes spine to bend forward even in upright poses.
+- **Face tracking weakness**: Face landmarks (nose, eyes, ears) had weights 0.25-0.35, allowing head to drift. Increased to 0.70-0.80.
