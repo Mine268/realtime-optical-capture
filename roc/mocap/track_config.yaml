@@ -16,7 +16,8 @@ loss_weights:
   shoulder_line: 0.08
   spine_bezier: 0.12
   spine_sagittal: 0.12
-  hip_symmetry: 0.03
+  hip_symmetry: 0.0   # disabled — natural hip motion is asymmetric during turns
+  upper_body_symmetry: 0.003   # soft symmetry on collars/shoulders/elbows
   pelvis_frame: 0.20
 
 temporal:

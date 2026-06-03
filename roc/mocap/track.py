@@ -383,7 +383,8 @@ class RealtimeSmplxTracker:
                 tgt_hip_l_idx=_target_hip_l,
                 tgt_hip_r_idx=_target_hip_r,
             )
-            loss = loss + float(lw.get("hip_symmetry", 0.03)) * _hip_symmetry_loss(T, bp)
+            loss = loss + float(lw.get("hip_symmetry", 0.0)) * _hip_symmetry_loss(T, bp)
+            loss = loss + float(lw.get("upper_body_symmetry", 0.003)) * _upper_body_symmetry_loss(T, bp)
             loss = loss + float(lw.get("pelvis_frame", 0.20)) * _pelvis_frame_loss(
                 T,
                 out.joints[0],
@@ -800,6 +801,29 @@ def _hip_symmetry_loss(T: object, body_pose: object) -> object:
     l_norm = T.linalg.norm(l_hip, dim=1)
     r_norm = T.linalg.norm(r_hip, dim=1)
     return T.mean((l_norm - r_norm).square())
+
+
+def _upper_body_symmetry_loss(T: object, body_pose: object) -> object:
+    """Soft symmetry on collar, shoulder, elbow joint rotation magnitudes.
+
+    Collars are weighted highest (attached to the same spine3 vertebra),
+    shoulders moderate, elbows lowest.  The loss is intentionally weak so
+    natural asymmetric motions (throwing, reaching) are preserved.
+    """
+    loss = 0.0
+    # collars: bp[12], bp[13] — should be nearly symmetric
+    l_c = T.linalg.norm(body_pose[:, 36:39], dim=1)
+    r_c = T.linalg.norm(body_pose[:, 39:42], dim=1)
+    loss = loss + 1.0 * T.mean((l_c - r_c).square())
+    # shoulders: bp[15], bp[16]
+    l_s = T.linalg.norm(body_pose[:, 45:48], dim=1)
+    r_s = T.linalg.norm(body_pose[:, 48:51], dim=1)
+    loss = loss + 0.7 * T.mean((l_s - r_s).square())
+    # elbows: bp[17], bp[18]
+    l_e = T.linalg.norm(body_pose[:, 51:54], dim=1)
+    r_e = T.linalg.norm(body_pose[:, 54:57], dim=1)
+    loss = loss + 0.4 * T.mean((l_e - r_e).square())
+    return loss
 
 
 def _pelvis_frame_loss(
