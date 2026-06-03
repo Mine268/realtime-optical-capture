@@ -144,6 +144,25 @@ class RealtimeSmplxTracker:
         )
         self._axis_weights = self.T.tensor([2.0, 1.0], device=self.device, dtype=self.T.float32)
 
+        self._smplx_shoulder_idx = self.T.tensor(
+            [self.joint_name_to_idx["left_shoulder"], self.joint_name_to_idx["right_shoulder"]],
+            device=self.device, dtype=self.T.long,
+        )
+        self._target_shoulder_idx = self.T.tensor(
+            [body_idx["left_shoulder"], body_idx["right_shoulder"]],
+            device=self.device, dtype=self.T.long,
+        )
+
+        # Spine direction: pelvis→neck in SMPL-X, hips_center→neck_center in target
+        self._smplx_spine_idx = self.T.tensor(
+            [self.joint_name_to_idx["pelvis"], self.joint_name_to_idx["neck"]],
+            device=self.device, dtype=self.T.long,
+        )
+        self._target_spine_idx = self.T.tensor(
+            [body_idx["hips_center"], body_idx["neck_center"]],
+            device=self.device, dtype=self.T.long,
+        )
+
         # Warm-start state on GPU
         self._prev_bp = self.T.zeros(1, 63, device=self.device)
         self._prev_go = self.T.zeros(1, 3, device=self.device)
@@ -207,6 +226,8 @@ class RealtimeSmplxTracker:
         _smplx_axis_pairs = self._smplx_axis_pairs
         _target_axis_pairs = self._target_axis_pairs
         _axis_weights = self._axis_weights
+        _smplx_shoulder_idx = self._smplx_shoulder_idx
+        _target_shoulder_idx = self._target_shoulder_idx
 
         # Adam with joint-specific priors. Knees stay loose so squats can bend.
         steady_steps = max(1, int(self.config.track_pose_steps))
@@ -258,6 +279,13 @@ class RealtimeSmplxTracker:
                 _smplx_axis_pairs,
                 _target_axis_pairs,
                 _axis_weights,
+            )
+            loss = loss + 0.08 * _shoulder_line_loss(
+                T,
+                out.joints[0],
+                target_full,
+                _smplx_shoulder_idx,
+                _target_shoulder_idx,
             )
 
             if has_prev:
@@ -456,6 +484,65 @@ def _axis_alignment_loss(
     diffs = pred_axis[valid] - target_axis[valid]
     valid_weights = weights[valid]
     return (valid_weights[:, None] * diffs.square()).sum() / (2.0 * valid_weights.sum().clamp_min(1e-6))
+
+
+def _shoulder_line_loss(
+    T: object,
+    pred_joints: object,
+    target_points: object,
+    smplx_shoulder_idx: object,
+    target_shoulder_idx: object,
+) -> object:
+    """Penalise perpendicular distance from SMPL-X shoulders to the MediaPipe shoulder line."""
+    tgt_l = target_points[target_shoulder_idx[0]]
+    tgt_r = target_points[target_shoulder_idx[1]]
+    if not bool(T.isfinite(tgt_l).all() & T.isfinite(tgt_r).all()):
+        return pred_joints.sum() * 0.0
+
+    line = tgt_r - tgt_l
+    line_len_sq = T.dot(line, line)
+    if line_len_sq < 1e-10:
+        return pred_joints.sum() * 0.0
+
+    loss = 0.0
+    for i in range(2):
+        pred_pt = pred_joints[smplx_shoulder_idx[i]]
+        to_l = pred_pt - tgt_l
+        proj_factor = T.clamp(T.dot(to_l, line) / line_len_sq, 0.0, 1.0)
+        perp = to_l - proj_factor * line
+        loss = loss + T.sum(perp.square())
+    return loss / 2.0
+
+
+def _spine_direction_loss(
+    T: object,
+    pred_joints: object,
+    target_points: object,
+    smplx_spine_idx: object,
+    target_spine_idx: object,
+) -> object:
+    """Penalise deviation between SMPL-X spine direction (pelvis→neck) and target."""
+    pred_pelvis = pred_joints[smplx_spine_idx[0]]
+    pred_neck = pred_joints[smplx_spine_idx[1]]
+    tgt_hips = target_points[target_spine_idx[0]]
+    tgt_neck = target_points[target_spine_idx[1]]
+
+    if not bool(T.isfinite(tgt_hips).all() & T.isfinite(tgt_neck).all()):
+        return pred_joints.sum() * 0.0
+
+    pred_dir = pred_neck - pred_pelvis
+    tgt_dir = tgt_neck - tgt_hips
+
+    pred_norm = T.linalg.norm(pred_dir)
+    tgt_norm = T.linalg.norm(tgt_dir)
+    if pred_norm < 1e-8 or tgt_norm < 1e-8:
+        return pred_joints.sum() * 0.0
+
+    pred_dir = pred_dir / pred_norm
+    tgt_dir = tgt_dir / tgt_norm
+
+    # Cosine distance: penalise any angular deviation of the spine axis
+    return 1.0 - T.dot(pred_dir, tgt_dir)
 
 
 def _horizontal_axis(T: object, axis: object) -> object:
