@@ -423,7 +423,7 @@ def main() -> None:
             from roc.mocap.retarget import RetargetConfig, RetargetMode
             retarget_mode = RetargetMode(args.retarget_mode)
             if retarget_mode == RetargetMode.TRACK:
-                track_pose_steps = args.retarget_pose_steps if args.retarget_pose_steps is not None else 25  # default in RetargetConfig
+                track_pose_steps = args.retarget_pose_steps if args.retarget_pose_steps is not None else 30  # default in RetargetConfig
             else:
                 track_pose_steps = 20
             track_recovery_pose_steps = (
