@@ -153,15 +153,25 @@ class RealtimeSmplxTracker:
             device=self.device, dtype=self.T.long,
         )
 
-        # Spine direction: pelvis→neck in SMPL-X, hips_center→neck_center in target
-        self._smplx_spine_idx = self.T.tensor(
-            [self.joint_name_to_idx["pelvis"], self.joint_name_to_idx["neck"]],
-            device=self.device, dtype=self.T.long,
-        )
-        self._target_spine_idx = self.T.tensor(
-            [body_idx["hips_center"], body_idx["neck_center"]],
-            device=self.device, dtype=self.T.long,
-        )
+        # Spine Bezier: 5 SMPL-X joints along the spine chain
+        self._smplx_spine_chain = self.T.tensor([
+            self.joint_name_to_idx[n] for n in
+            ["pelvis", "spine1", "spine2", "spine3", "neck"]
+        ], device=self.device, dtype=self.T.long)
+
+        # Target: hips_center, neck_center, left_hip, right_hip for spine geometry
+        self._target_hips_center = body_idx["hips_center"]
+        self._target_neck_center = body_idx["neck_center"]
+        self._target_hip_l = body_idx["left_hip"]
+        self._target_hip_r = body_idx["right_hip"]
+
+        # Bezier parameters (learned from fit data, normalized by spine length)
+        self._bezier_t = self.T.tensor([0.0, 0.25, 0.50, 0.65, 1.0],
+                                        device=self.device, dtype=self.T.float32)
+        self._bezier_p1_along = 0.27   # P1 along fraction
+        self._bezier_p1_perp = 0.24    # P1 perpendicular fraction
+        self._bezier_p2_along = 0.69   # P2 along fraction
+        self._bezier_p2_perp = 0.28    # P2 perpendicular fraction
 
         # Warm-start state on GPU
         self._prev_bp = self.T.zeros(1, 63, device=self.device)
@@ -228,6 +238,10 @@ class RealtimeSmplxTracker:
         _axis_weights = self._axis_weights
         _smplx_shoulder_idx = self._smplx_shoulder_idx
         _target_shoulder_idx = self._target_shoulder_idx
+        _smplx_spine_chain = self._smplx_spine_chain
+        _bezier_t = self._bezier_t
+        _target_hip_l = self._target_hip_l
+        _target_hip_r = self._target_hip_r
 
         # Adam with joint-specific priors. Knees stay loose so squats can bend.
         steady_steps = max(1, int(self.config.track_pose_steps))
@@ -286,6 +300,21 @@ class RealtimeSmplxTracker:
                 target_full,
                 _smplx_shoulder_idx,
                 _target_shoulder_idx,
+            )
+            loss = loss + 0.12 * _spine_bezier_loss(
+                T,
+                out.joints[0],
+                target_full,
+                _smplx_spine_chain,
+                _bezier_t,
+                0, 0,
+                _target_hip_l,
+                _target_hip_r,
+            )
+            loss = loss + 0.06 * _spine_sagittal_loss(
+                T,
+                out.joints[0],
+                _smplx_spine_chain,
             )
 
             if has_prev:
@@ -543,6 +572,127 @@ def _spine_direction_loss(
 
     # Cosine distance: penalise any angular deviation of the spine axis
     return 1.0 - T.dot(pred_dir, tgt_dir)
+
+
+def _bezier_point(
+    t: object, P0: object, P1: object, P2: object, P3: object,
+) -> object:
+    """Cubic Bezier B(t) = (1-t)³P0 + 3(1-t)²t·P1 + 3(1-t)t²·P2 + t³P3."""
+    t = t.unsqueeze(-1) if t.dim() < 2 else t
+    mt = 1.0 - t
+    return mt**3 * P0 + 3 * mt**2 * t * P1 + 3 * mt * t**2 * P2 + t**3 * P3
+
+
+def _spine_bezier_loss(
+    T: object,
+    pred_joints: object,       # (127, 3) SMPL-X joints
+    target_points: object,     # (75, 3) raw MediaPipe landmarks
+    smplx_spine_chain: object, # (5,) SMPL-X indices: pelvis, spine1, spine2, spine3, neck
+    bezier_t: object,          # (5,) t parameters
+    _hips_idx: int,            # unused (derived from hip_L + hip_R)
+    _neck_idx: int,            # unused (derived from shoulder_L + shoulder_R)
+    hip_l_idx: int,            # BODY_NAMES index for left_hip → raw MP index
+    hip_r_idx: int,            # BODY_NAMES index for right_hip
+    shoulder_l_idx: int = 11,  # BODY_NAMES index for left_shoulder → raw MP index 11
+    shoulder_r_idx: int = 12,  # BODY_NAMES index for right_shoulder → raw MP index 12
+    p1_along: float = 0.27, p1_perp: float = 0.24,
+    p2_along: float = 0.69, p2_perp: float = 0.28,
+) -> object:
+    """Penalise spine joints deviating from a Bezier curve anchored by computed target positions.
+
+    hips_center and neck_center are derived from raw MediaPipe landmarks rather than
+    indexed directly (they are not present in the 75-element array).
+    """
+    # Compute target anchors from raw MediaPipe landmarks
+    tgt_hl = target_points[hip_l_idx]
+    tgt_hr = target_points[hip_r_idx]
+    tgt_sl = target_points[shoulder_l_idx]
+    tgt_sr = target_points[shoulder_r_idx]
+
+    valid = (T.isfinite(tgt_hl).all() & T.isfinite(tgt_hr).all() &
+             T.isfinite(tgt_sl).all() & T.isfinite(tgt_sr).all())
+    if not bool(valid):
+        return pred_joints.sum() * 0.0
+
+    tgt_pelvis = (tgt_hl + tgt_hr) / 2.0   # hips_center
+    tgt_neck = (tgt_sl + tgt_sr) / 2.0     # neck_center
+
+    spine_vec = tgt_neck - tgt_pelvis
+    spine_len = T.linalg.norm(spine_vec)
+    if spine_len < 1e-8:
+        return pred_joints.sum() * 0.0
+    spine_dir = spine_vec / spine_len
+
+    # Forward perpendicular direction: cross(hip_axis, spine_dir)
+    hip_axis = tgt_hr - tgt_hl
+    forward = T.cross(hip_axis, spine_vec)
+    forward_norm = T.linalg.norm(forward)
+    if forward_norm > 1e-8:
+        forward = forward / forward_norm
+    else:
+        return pred_joints.sum() * 0.0
+
+    # Build Bezier control points
+    P0 = tgt_pelvis
+    P1 = tgt_pelvis + p1_along * spine_vec + p1_perp * spine_len * forward
+    P2 = tgt_pelvis + p2_along * spine_vec + p2_perp * spine_len * forward
+    P3 = tgt_neck
+
+    # Evaluate Bezier at t = 0.25 (spine1), 0.50 (spine2), 0.65 (spine3)
+    t_eval = bezier_t[1:4]
+    target_spine = _bezier_point(t_eval, P0, P1, P2, P3)
+
+    pred_spine = pred_joints[smplx_spine_chain[1:4]]
+    diffs = pred_spine - target_spine
+    return T.mean(diffs.square())
+
+
+def _spine_sagittal_loss(
+    T: object,
+    pred_joints: object,
+    smplx_spine_chain: object,
+) -> object:
+    """Penalise lateral (side-to-side) bending of the spine.
+
+    The spine should bend in the sagittal plane (forward), not left-right.
+    The hip axis (left_hip→right_hip) defines the lateral direction.
+    Any spine joint deviation in this direction relative to the pelvis→neck
+    line is penalised.
+    """
+    # SMPL-X hip and spine positions
+    left_hip = pred_joints[1]   # SMPL-X left_hip
+    right_hip = pred_joints[2]  # SMPL-X right_hip
+    spine_pts = pred_joints[smplx_spine_chain]  # pelvis, spine1, spine2, spine3, neck
+
+    hip_axis = right_hip - left_hip
+    hip_axis_norm = T.linalg.norm(hip_axis)
+    if hip_axis_norm < 1e-8:
+        return pred_joints.sum() * 0.0
+    lateral_dir = hip_axis / hip_axis_norm
+
+    # For each spine joint, compute lateral displacement from the pelvis→neck line
+    pelvis = spine_pts[0]
+    neck = spine_pts[4]
+    spine_dir = neck - pelvis
+    spine_len = T.linalg.norm(spine_dir)
+    if spine_len < 1e-8:
+        return pred_joints.sum() * 0.0
+    spine_dir = spine_dir / spine_len
+
+    # Lateral component of spine1/2/3 relative to the pelvis→neck line
+    loss = 0.0
+    for i in range(1, 4):
+        to_pelvis = spine_pts[i] - pelvis
+        # Project onto pelvis→neck line
+        along = T.dot(to_pelvis, spine_dir)
+        # Projection point on the line
+        proj = pelvis + along * spine_dir
+        # Deviation from the line
+        dev = spine_pts[i] - proj
+        # Lateral component (projection onto hip_axis direction)
+        lateral = T.dot(dev, lateral_dir)
+        loss = loss + lateral.square()
+    return loss / 3.0
 
 
 def _horizontal_axis(T: object, axis: object) -> object:
