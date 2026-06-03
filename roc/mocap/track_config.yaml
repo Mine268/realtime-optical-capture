@@ -1,0 +1,121 @@
+# SMPL-X track mode hyperparameters
+# Edit this file to tune loss weights, priors, and optimisation parameters.
+schema_version: 1
+
+optimizer:
+  learning_rates:
+    body_pose: 0.08
+    global_orient: 0.05
+    transl: 0.03
+
+loss_weights:
+  knee_angle: 0.04
+  elbow_angle: 0.03
+  elbow_max_segment_m: 0.40
+  axis_alignment: 0.10
+  shoulder_line: 0.08
+  spine_bezier: 0.12
+  spine_sagittal: 0.12
+  hip_symmetry: 0.03
+  pelvis_frame: 0.20
+
+temporal:
+  global_orient_scale: 0.5   # relative to body_pose temporal weight
+  transl_scale: 0.3
+  velocity_global_orient_scale: 0.3
+  velocity_transl_scale: 0.2
+  acceleration_global_orient_scale: 0.3
+  acceleration_transl_scale: 0.2
+
+bezier:
+  t_values: [0.0, 0.25, 0.50, 0.65, 1.0]
+  p1_along: 0.25
+  p1_perp: 0.12
+  p2_along: 0.67
+  p2_perp: 0.16
+
+axis_weights:
+  hip: 2.0
+  shoulder: 1.0
+
+post_smooth:
+  sigma: 0.03
+
+target_weights:
+  # Per-landmark MSE weights.  Missing landmarks default to 1.0.
+  left_knee: 2.3
+  right_knee: 2.3
+  left_ankle: 2.3
+  right_ankle: 2.3
+  left_heel: 1.8
+  right_heel: 1.8
+  left_foot_index: 1.8
+  right_foot_index: 1.8
+  left_hip: 1.8
+  right_hip: 1.8
+  hips_center: 0.35
+  left_shoulder: 1.7
+  right_shoulder: 1.7
+  left_elbow: 1.05
+  right_elbow: 1.05
+  left_wrist: 0.55
+  right_wrist: 0.55
+  trunk_center: 0.25
+  neck_center: 0.25
+  head_center: 0.80
+  nose: 0.70
+  left_eye: 0.70
+  right_eye: 0.70
+  left_ear: 0.70
+  right_ear: 0.70
+
+target_smooth_alpha:
+  # Per-landmark EMA smoothing.  0.0 = no smoothing.  Missing = 0.0.
+  left_wrist: 0.05
+  right_wrist: 0.05
+  left_elbow: 0.10
+  right_elbow: 0.10
+
+body_pose_prior_weights:
+  # Per-joint L2 regularisation (body_pose ordering, 21 joints).
+  # 0=left_hip 1=right_hip 2=spine1 3=left_knee 4=right_knee
+  # 5=spine2 6=left_ankle 7=right_ankle 8=spine3 9=left_foot
+  # 10=right_foot 11=neck 12=left_collar 13=right_collar 14=head
+  # 15=left_shoulder 16=right_shoulder 17=left_elbow 18=right_elbow
+  # 19=left_wrist 20=right_wrist
+  default: 0.005
+  joints:
+    0: 0.010   # left_hip
+    1: 0.010   # right_hip
+    2: 0.040   # spine1
+    5: 0.045   # spine2
+    8: 0.045   # spine3
+    11: 0.030  # neck
+    12: 0.030  # left_collar
+    13: 0.030  # right_collar
+    14: 0.020  # head
+    15: 0.020  # left_shoulder
+    16: 0.020  # right_shoulder
+    17: 0.020  # left_elbow
+    18: 0.020  # right_elbow
+    19: 0.080  # left_wrist
+    20: 0.080  # right_wrist
+
+body_pose_temporal_weights:
+  # Per-joint temporal smoothing.  Higher = smoother across frames.
+  default: 1.0
+  groups:
+    - joints: [0, 1]             # hips
+      weight: 0.7
+    - joints: [2, 5, 8]          # spine
+      weight: 0.30
+    - joints: [3, 4, 6, 7, 9, 10]   # legs
+      weight: 0.65
+    - joints: [11, 14]           # neck, head
+      weight: 0.8
+    - joints: [12, 13]           # collars
+      weight: 1.0
+    - joints: [15, 16, 17, 18]   # shoulders, elbows
+      weight: 1.2
+    - joints: [19, 20]           # wrists
+      weight: 0.8

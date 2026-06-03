@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import time
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import yaml
@@ -18,11 +19,36 @@ from roc.mocap.retarget import (
     _write_report,
 )
 
+# Default track hyperparameter config shipped alongside this module.
+_DEFAULT_TRACK_CONFIG_PATH = Path(__file__).resolve().parent / "track_config.yaml"
+
+
+def _load_track_config(path: Path | str | None = None) -> dict[str, Any]:
+    """Load track hyperparameters from a YAML file.
+
+    Returns a dict with keys: optimizer, loss_weights, temporal, bezier,
+    axis_weights, post_smooth, target_weights, target_smooth_alpha,
+    body_pose_prior_weights, body_pose_temporal_weights.
+    """
+    resolved = Path(path) if path else _DEFAULT_TRACK_CONFIG_PATH
+    if not resolved.is_file():
+        raise RuntimeError(f"Track config not found: {resolved}")
+    with open(resolved, encoding="utf-8") as fh:
+        cfg = yaml.safe_load(fh) or {}
+    if not isinstance(cfg, dict):
+        raise RuntimeError(f"Track config must be a mapping: {resolved}")
+    return cfg
+
 
 class RealtimeSmplxTracker:
     """Body-only SMPL-X tracker using vectorised Adam optimisation."""
 
-    def __init__(self, config: RetargetConfig, output_dir: Path) -> None:
+    def __init__(
+        self,
+        config: RetargetConfig,
+        output_dir: Path,
+        track_config_path: Path | str | None = None,
+    ) -> None:
         output_dir.mkdir(parents=True, exist_ok=True)
         model_dir = _resolve_smplx_model_dir(config.model_dir)
         if not model_dir.is_dir():
@@ -43,6 +69,10 @@ class RealtimeSmplxTracker:
         )
         self.shared_betas = self.T.zeros((1, 10), dtype=self.T.float32, device=self.device)
 
+        # Load hyperparameters from YAML
+        tcfg = _load_track_config(track_config_path)
+        self._tcfg = tcfg
+
         # Pre-build index tensors
         body_smplx_map = dict(getattr(self.fitter, "BODY_SMPLX_MAP", {}))
         body_smplx_map.setdefault("left_shoulder", "left_shoulder")
@@ -59,22 +89,22 @@ class RealtimeSmplxTracker:
         self._tgt_idx = self.T.tensor(tgt_l, device=self.device, dtype=self.T.long)
         self._target_names = target_names
         self._target_weights = self.T.tensor(
-            [_target_weight(name) for name in target_names],
+            [_target_weight(name, tcfg) for name in target_names],
             device=self.device,
             dtype=self.T.float32,
         )
         self._target_smooth_alpha = self.T.tensor(
-            [_target_smooth_alpha(name) for name in target_names],
+            [_target_smooth_alpha(name, tcfg) for name in target_names],
             device=self.device,
             dtype=self.T.float32,
         )
         self._pose_prior_weights = self.T.tensor(
-            _body_pose_prior_weights(),
+            _body_pose_prior_weights(tcfg),
             device=self.device,
             dtype=self.T.float32,
         ).view(1, 63)
         self._temporal_weights = self.T.tensor(
-            _body_pose_temporal_weights(),
+            _body_pose_temporal_weights(tcfg),
             device=self.device,
             dtype=self.T.float32,
         ).view(1, 63)
@@ -142,7 +172,11 @@ class RealtimeSmplxTracker:
             device=self.device,
             dtype=self.T.long,
         )
-        self._axis_weights = self.T.tensor([2.0, 1.0], device=self.device, dtype=self.T.float32)
+        axw = tcfg.get("axis_weights", {})
+        self._axis_weights = self.T.tensor(
+            [float(axw.get("hip", 2.0)), float(axw.get("shoulder", 1.0))],
+            device=self.device, dtype=self.T.float32,
+        )
 
         self._smplx_shoulder_idx = self.T.tensor(
             [self.joint_name_to_idx["left_shoulder"], self.joint_name_to_idx["right_shoulder"]],
@@ -166,12 +200,15 @@ class RealtimeSmplxTracker:
         self._target_hip_r = body_idx["right_hip"]
 
         # Bezier parameters (learned from fit data, normalized by spine length)
-        self._bezier_t = self.T.tensor([0.0, 0.25, 0.50, 0.65, 1.0],
-                                        device=self.device, dtype=self.T.float32)
-        self._bezier_p1_along = 0.25   # P1 along fraction
-        self._bezier_p1_perp = 0.12    # P1 perpendicular fraction (moderate)
-        self._bezier_p2_along = 0.67   # P2 along fraction
-        self._bezier_p2_perp = 0.16    # P2 perpendicular fraction (moderate)
+        bz = tcfg.get("bezier", {})
+        self._bezier_t = self.T.tensor(
+            bz.get("t_values", [0.0, 0.25, 0.50, 0.65, 1.0]),
+            device=self.device, dtype=self.T.float32,
+        )
+        self._bezier_p1_along = float(bz.get("p1_along", 0.25))
+        self._bezier_p1_perp = float(bz.get("p1_perp", 0.12))
+        self._bezier_p2_along = float(bz.get("p2_along", 0.67))
+        self._bezier_p2_perp = float(bz.get("p2_perp", 0.16))
 
         # Spine direction: SMPL-X pelvis→neck indices + target hip/shoulder refs
         self._smplx_spine_dir_idx = self.T.tensor(
@@ -260,15 +297,27 @@ class RealtimeSmplxTracker:
         n_steps = recovery_steps if not has_prev else steady_steps
         adapter_elapsed = time.perf_counter() - start
 
+        opt_cfg = self._tcfg.get("optimizer", {})
+        lr_cfg = opt_cfg.get("learning_rates", {})
         optimizer = T.optim.Adam([
-            {"params": [bp], "lr": 0.08},
-            {"params": [go], "lr": 0.05},
-            {"params": [tr], "lr": 0.03},
+            {"params": [bp], "lr": float(lr_cfg.get("body_pose", 0.08))},
+            {"params": [go], "lr": float(lr_cfg.get("global_orient", 0.05))},
+            {"params": [tr], "lr": float(lr_cfg.get("transl", 0.03))},
         ])
 
         if self.device.type == "cuda":
             T.cuda.synchronize()
         opt_start = time.perf_counter()
+
+        lw = self._tcfg.get("loss_weights", {})
+        tcfg_temporal = self._tcfg.get("temporal", {})
+        go_scale = float(tcfg_temporal.get("global_orient_scale", 0.5))
+        tr_scale = float(tcfg_temporal.get("transl_scale", 0.3))
+        v_go_scale = float(tcfg_temporal.get("velocity_global_orient_scale", 0.3))
+        v_tr_scale = float(tcfg_temporal.get("velocity_transl_scale", 0.2))
+        a_go_scale = float(tcfg_temporal.get("acceleration_global_orient_scale", 0.3))
+        a_tr_scale = float(tcfg_temporal.get("acceleration_transl_scale", 0.2))
+
         for _ in range(n_steps):
             optimizer.zero_grad()
             out = _model(
@@ -282,22 +331,22 @@ class RealtimeSmplxTracker:
             loss = (valid_weights[:, None] * diffs.square()).sum() / (3.0 * valid_weights.sum().clamp_min(1e-6))
 
             loss = loss + T.mean(_pose_prior_weights * bp.square())
-            loss = loss + 0.04 * _knee_angle_loss(
+            loss = loss + float(lw.get("knee_angle", 0.04)) * _knee_angle_loss(
                 T,
                 out.joints[0],
                 target_full,
                 _smplx_knee_triplets,
                 _target_knee_triplets,
             )
-            loss = loss + 0.03 * _knee_angle_loss(
+            loss = loss + float(lw.get("elbow_angle", 0.03)) * _knee_angle_loss(
                 T,
                 out.joints[0],
                 target_full,
                 _smplx_elbow_triplets,
                 _target_elbow_triplets,
-                max_target_segment_m=0.40,
+                max_target_segment_m=float(lw.get("elbow_max_segment_m", 0.40)),
             )
-            loss = loss + 0.10 * _axis_alignment_loss(
+            loss = loss + float(lw.get("axis_alignment", 0.10)) * _axis_alignment_loss(
                 T,
                 out.joints[0],
                 target_full,
@@ -305,14 +354,14 @@ class RealtimeSmplxTracker:
                 _target_axis_pairs,
                 _axis_weights,
             )
-            loss = loss + 0.08 * _shoulder_line_loss(
+            loss = loss + float(lw.get("shoulder_line", 0.08)) * _shoulder_line_loss(
                 T,
                 out.joints[0],
                 target_full,
                 _smplx_shoulder_idx,
                 _target_shoulder_idx,
             )
-            loss = loss + 0.12 * _spine_bezier_loss(
+            loss = loss + float(lw.get("spine_bezier", 0.12)) * _spine_bezier_loss(
                 T,
                 out.joints[0],
                 target_full,
@@ -326,7 +375,7 @@ class RealtimeSmplxTracker:
                 p2_along=self._bezier_p2_along,
                 p2_perp=self._bezier_p2_perp,
             )
-            loss = loss + 0.12 * _spine_sagittal_loss(
+            loss = loss + float(lw.get("spine_sagittal", 0.12)) * _spine_sagittal_loss(
                 T,
                 out.joints[0],
                 _smplx_spine_chain,
@@ -334,8 +383,8 @@ class RealtimeSmplxTracker:
                 tgt_hip_l_idx=_target_hip_l,
                 tgt_hip_r_idx=_target_hip_r,
             )
-            loss = loss + 0.03 * _hip_symmetry_loss(T, bp)
-            loss = loss + 0.20 * _pelvis_frame_loss(
+            loss = loss + float(lw.get("hip_symmetry", 0.03)) * _hip_symmetry_loss(T, bp)
+            loss = loss + float(lw.get("pelvis_frame", 0.20)) * _pelvis_frame_loss(
                 T,
                 out.joints[0],
                 target_full,
@@ -349,8 +398,8 @@ class RealtimeSmplxTracker:
             if has_prev:
                 loss = loss + tw * (
                     T.mean(_temporal_weights * (bp - p_bp).square())
-                    + 0.5 * T.mean((go - p_go) ** 2)
-                    + 0.3 * T.mean((tr - p_tr) ** 2)
+                    + go_scale * T.mean((go - p_go) ** 2)
+                    + tr_scale * T.mean((tr - p_tr) ** 2)
                 )
             if has_pp:
                 vw = self.config.track_velocity_weight
@@ -360,15 +409,15 @@ class RealtimeSmplxTracker:
                     cv_tr = tr - p_tr; pv_tr = p_tr - pp_tr
                     loss = loss + vw * (
                         T.mean(_temporal_weights * (cv_bp - pv_bp).square())
-                        + 0.3 * T.mean((cv_go - pv_go) ** 2)
-                        + 0.2 * T.mean((cv_tr - pv_tr) ** 2)
+                        + v_go_scale * T.mean((cv_go - pv_go) ** 2)
+                        + v_tr_scale * T.mean((cv_tr - pv_tr) ** 2)
                     )
                 aw = self.config.track_acceleration_weight
                 if aw > 0:
                     loss = loss + aw * (
                         T.mean(_temporal_weights * (bp - 2 * p_bp + pp_bp).square())
-                        + 0.3 * T.mean((go - 2 * p_go + pp_go) ** 2)
-                        + 0.2 * T.mean((tr - 2 * p_tr + pp_tr) ** 2)
+                        + a_go_scale * T.mean((go - 2 * p_go + pp_go) ** 2)
+                        + a_tr_scale * T.mean((tr - 2 * p_tr + pp_tr) ** 2)
                     )
             loss.backward()
             optimizer.step()
@@ -447,7 +496,8 @@ class RealtimeSmplxTracker:
     def save(self, source_npz: Path | None = None) -> Path:
         if not self.aggregate:
             raise RuntimeError("No track frames were produced")
-        _apply_so3_smooth(self.aggregate, sigma=0.03)
+        sigma = float(self._tcfg.get("post_smooth", {}).get("sigma", 0.03))
+        _apply_so3_smooth(self.aggregate, sigma=sigma)
         self._refresh_smoothed_joints()
         sequence_path = self.output_dir / "smplx_fit_sequence.npz"
         _save_sequence_npz(sequence_path, self.aggregate, self.config, source_npz=source_npz)
@@ -796,96 +846,41 @@ def _horizontal_axis(T: object, axis: object) -> object:
     return xy / norm
 
 
-def _target_weight(name: str) -> float:
-    if name in {"left_knee", "right_knee", "left_ankle", "right_ankle"}:
-        return 2.3
-    if name in {"left_heel", "right_heel", "left_foot_index", "right_foot_index"}:
-        return 1.8
-    if name in {"left_hip", "right_hip"}:
-        return 1.8
-    if name == "hips_center":
-        return 0.35
-    if name in {"left_shoulder", "right_shoulder"}:
-        return 1.7
-    if name in {"left_elbow", "right_elbow"}:
-        return 1.05
-    if name in {"left_wrist", "right_wrist"}:
-        return 0.55
-    if name in {"trunk_center", "neck_center"}:
-        return 0.25
-    if name == "head_center":
-        return 0.80
-    if name in {"nose", "left_eye", "right_eye", "left_ear", "right_ear"}:
-        return 0.70
+def _target_weight(name: str, tcfg: dict[str, Any]) -> float:
+    """Per-landmark MSE weight from track config."""
+    tw = tcfg.get("target_weights", {})
+    if name in tw:
+        return float(tw[name])
     return 1.0
 
 
-def _target_smooth_alpha(name: str) -> float:
-    if name in {"left_wrist", "right_wrist"}:
-        return 0.05
-    if name in {"left_elbow", "right_elbow"}:
-        return 0.10
+def _target_smooth_alpha(name: str, tcfg: dict[str, Any]) -> float:
+    """Per-landmark EMA smoothing alpha from track config."""
+    sa = tcfg.get("target_smooth_alpha", {})
+    if name in sa:
+        return float(sa[name])
     return 0.0
 
 
-def _body_pose_prior_weights() -> np.ndarray:
-    """Per-joint L2 regularisation weights for body_pose (21 joints × 3 = 63).
-
-    body_pose ordering (verified against SMPL-X model by perturbation test):
-      0=left_hip  1=right_hip  2=spine1  3=left_knee  4=right_knee
-      5=spine2  6=left_ankle  7=right_ankle  8=spine3  9=left_foot
-      10=right_foot  11=neck  12=left_collar  13=right_collar  14=head
-      15=left_shoulder  16=right_shoulder  17=left_elbow  18=right_elbow
-      19=left_wrist  20=right_wrist
-
-    Spine priors kept moderately high to prevent excessive bending — the
-    Bezier + sagittal losses provide geometric guidance, priors bound the
-    extremes.  Knees/ankles/feet are left nearly free for natural motion.
-    """
-    weights = np.full(63, 0.005, dtype=np.float32)
-    _set_joint_weight(weights, 0, 0.010)   # left_hip
-    _set_joint_weight(weights, 1, 0.010)   # right_hip
-    _set_joint_weight(weights, 2, 0.040)   # spine1 — track_final level
-    _set_joint_weight(weights, 5, 0.045)   # spine2 — track_final level
-    _set_joint_weight(weights, 8, 0.045)   # spine3 — track_final level
-    _set_joint_weight(weights, 11, 0.030)  # neck
-    _set_joint_weight(weights, 12, 0.030)  # left_collar
-    _set_joint_weight(weights, 13, 0.030)  # right_collar
-    _set_joint_weight(weights, 14, 0.020)  # head
-    _set_joint_weight(weights, 15, 0.020)  # left_shoulder
-    _set_joint_weight(weights, 16, 0.020)  # right_shoulder
-    _set_joint_weight(weights, 17, 0.020)  # left_elbow
-    _set_joint_weight(weights, 18, 0.020)  # right_elbow
-    _set_joint_weight(weights, 19, 0.080)  # left_wrist
-    _set_joint_weight(weights, 20, 0.080)  # right_wrist
+def _body_pose_prior_weights(tcfg: dict[str, Any]) -> np.ndarray:
+    """Per-joint L2 regularisation weights from track config (21 joints × 3 = 63)."""
+    pw = tcfg.get("body_pose_prior_weights", {})
+    default = float(pw.get("default", 0.005))
+    weights = np.full(63, default, dtype=np.float32)
+    for joint_str, value in pw.get("joints", {}).items():
+        _set_joint_weight(weights, int(joint_str), float(value))
     return weights
 
 
-def _body_pose_temporal_weights() -> np.ndarray:
-    """Per-joint temporal smoothing weights.
-
-    Higher = more smoothing across frames.  Spine joints are low (Bezier
-    provides geometric stability); hips moderate; upper body highest.
-    body_pose: 0=l_hip 1=r_hip 2=sp1 3=l_knee 4=r_knee 5=sp2 6=l_ankle
-               7=r_ankle 8=sp3 9=l_foot 10=r_foot 11=neck 12=l_collar
-               13=r_collar 14=head 15=l_shoulder 16=r_shoulder 17=l_elbow
-               18=r_elbow 19=l_wrist 20=r_wrist
-    """
-    weights = np.ones(63, dtype=np.float32)
-    for joint in (0, 1):             # hips
-        _set_joint_weight(weights, joint, 0.7)
-    for joint in (2, 5, 8):          # spine — low temporal, Bezier provides shape
-        _set_joint_weight(weights, joint, 0.30)
-    for joint in (3, 4, 6, 7, 9, 10):   # legs
-        _set_joint_weight(weights, joint, 0.65)
-    for joint in (11, 14):           # neck, head
-        _set_joint_weight(weights, joint, 0.8)
-    for joint in (12, 13):           # collars
-        _set_joint_weight(weights, joint, 1.0)
-    for joint in (15, 16, 17, 18):   # shoulders, elbows
-        _set_joint_weight(weights, joint, 1.2)
-    for joint in (19, 20):           # wrists
-        _set_joint_weight(weights, joint, 0.8)
+def _body_pose_temporal_weights(tcfg: dict[str, Any]) -> np.ndarray:
+    """Per-joint temporal smoothing weights from track config (21 joints × 3 = 63)."""
+    tw = tcfg.get("body_pose_temporal_weights", {})
+    default = float(tw.get("default", 1.0))
+    weights = np.full(63, default, dtype=np.float32)
+    for group in tw.get("groups", []):
+        w = float(group["weight"])
+        for joint in group.get("joints", []):
+            _set_joint_weight(weights, int(joint), w)
     return weights
 
 
