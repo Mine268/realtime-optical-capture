@@ -249,28 +249,22 @@ def run_mocap_realtime(
                                                    np.max(xy_p[:,0]), np.max(xy_p[:,1])], dtype=np.float32)
                                 else:
                                     bb = np.array([np.nan, np.nan, np.nan, np.nan], dtype=np.float32)
-                                overlay = None
-                                if show_preview:
-                                    overlay = frame.copy()
-                                    for pt in pose.xy:
-                                        if not np.isnan(pt[0]):
-                                            cv2.circle(overlay, (int(pt[0]), int(pt[1])), 2, (0, 255, 0), -1)
                                 return {
                                     "serial": serial,
                                     "pose_xy": pose.xy, "pose_conf": pose.confidence,
                                     "hand_left_xy": hand.left_xy, "hand_left_conf": hand.left_confidence,
                                     "hand_right_xy": hand.right_xy, "hand_right_conf": hand.right_confidence,
-                                    "bbox": bb, "overlay": overlay,
+                                    "bbox": bb,
                                     "pose_s": t1 - t0, "hands_s": t2 - t1,
                                 }
 
                             ordered_results: list[dict] = []
+                            serial_to_result: dict = {}
                             with ThreadPoolExecutor(max_workers=len(cameras)) as pool:
                                 future_to_serial = {
                                     pool.submit(_detect_one, serial): serial
                                     for serial, _ in cameras
                                 }
-                                serial_to_result = {}
                                 for future in as_completed(future_to_serial):
                                     r = future.result()
                                     serial_to_result[r["serial"]] = r
@@ -288,8 +282,6 @@ def run_mocap_realtime(
                                 frame_set_right.append(r["hand_right_xy"])
                                 frame_set_right_conf.append(r["hand_right_conf"])
                                 frame_set_bbox.append(r["bbox"])
-                                if show_preview and r["overlay"] is not None:
-                                    preview_frames.append(r["overlay"])
 
                             stage_start = time.perf_counter()
                             timestamps.append(timestamp_ms)
@@ -335,12 +327,64 @@ def run_mocap_realtime(
                             if frame_index % 25 == 0:
                                 print(f"Processed frame set {frame_index}")
 
-                            if show_preview and preview_frames:
-                                preview = cv2.hconcat(preview_frames)
-                                cv2.imshow(preview_window, preview)
-                                key = cv2.waitKey(1) & 0xFF
-                                if key == ord("q"):
-                                    break
+                            if show_preview:
+                                # Build preview with 2D detections + SMPL-X skeleton reprojection
+                                preview_frames = []
+                                # Get latest SMPL-X body joints (world mm) from tracker output
+                                smplx_joints = None
+                                if realtime_retargeter is not None and realtime_retargeter.aggregate:
+                                    last = realtime_retargeter.aggregate[-1]
+                                    sj = last.get("smplx_joints")
+                                    if sj is not None:
+                                        if sj.ndim == 3:
+                                            sj = sj[0]  # (1, 127, 3) → (127, 3)
+                                        elif sj.ndim == 4:
+                                            sj = sj[0, 0]  # (1, 1, 127, 3) → (127, 3)
+                                        # Convert from meters (tracker scale) to mm for projection
+                                        smplx_joints = sj.astype(np.float64) / np.float64(retarget_config.input_scale if retarget_config else 0.001)
+
+                                # SMPL-X body edges to draw (same as render_reprojection_overlays)
+                                smplx_body_edges = [
+                                    (0, 1), (0, 2), (0, 3),
+                                    (1, 4), (4, 7), (7, 10),
+                                    (2, 5), (5, 8), (8, 11),
+                                    (3, 6), (6, 9), (9, 12), (9, 13), (9, 14),
+                                    (12, 15),
+                                    (13, 16), (16, 18), (18, 20),
+                                    (14, 17), (17, 19), (19, 21),
+                                ]
+
+                                for serial, camera in cameras:
+                                    frame = serial_to_frame[serial]
+                                    overlay = frame.copy()
+                                    # Draw 2D pose points (green)
+                                    det_result = serial_to_result.get(serial)
+                                    if det_result is not None:
+                                        for pt in det_result["pose_xy"]:
+                                            if not np.isnan(pt[0]):
+                                                cv2.circle(overlay, (int(pt[0]), int(pt[1])), 2, (0, 255, 0), -1)
+
+                                    # Draw SMPL-X skeleton (cyan) if available
+                                    if smplx_joints is not None and smplx_joints.shape[0] >= 22:
+                                        proj_idx = serial_to_projection_index.get(serial)
+                                        if proj_idx is not None:
+                                            proj = camera_group.project(smplx_joints[:22][None, :, :])  # (Nc, 1, 22, 2)
+                                            if proj_idx < proj.shape[0]:
+                                                xy = proj[proj_idx, 0]  # (22, 2)
+                                                for a, b in smplx_body_edges:
+                                                    if a < 22 and b < 22:
+                                                        pa = xy[a]; pb = xy[b]
+                                                        if np.isfinite(pa).all() and np.isfinite(pb).all():
+                                                            cv2.line(overlay, (int(pa[0]), int(pa[1])),
+                                                                     (int(pb[0]), int(pb[1])), (255, 255, 0), 2, cv2.LINE_AA)
+                                    preview_frames.append(overlay)
+
+                                if preview_frames:
+                                    preview = cv2.hconcat(preview_frames)
+                                    cv2.imshow(preview_window, preview)
+                                    key = cv2.waitKey(1) & 0xFF
+                                    if key == ord("q"):
+                                        break
 
                             frame_index += 1
                             if max_frames > 0 and frame_index >= max_frames:
