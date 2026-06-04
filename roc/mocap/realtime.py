@@ -106,6 +106,8 @@ def run_mocap_realtime(
                 print(f"Offline source dir: {offline_source_dir.resolve()}")
             camera_group = load_camera_group_from_toml(calibration_toml_path)
             calibrated_serials = camera_group_names(camera_group)
+            camera_names = [camera.get_name() for camera in camera_group.cameras]
+            serial_to_projection_index = {name: index for index, name in enumerate(camera_names)}
 
             pose_model_path = pose_model_path_for_complexity(model_complexity)
             hand_model_path_value = hand_model_path() if hands_enabled else None
