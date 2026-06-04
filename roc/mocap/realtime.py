@@ -370,9 +370,9 @@ def run_mocap_realtime(
                                     if smplx_joints is not None and smplx_joints.shape[0] >= 22:
                                         proj_idx = serial_to_projection_index.get(serial)
                                         if proj_idx is not None:
-                                            proj = camera_group.project(smplx_joints[:22][None, :, :])  # (Nc, 1, 22, 2)
+                                            proj = camera_group.project(smplx_joints[:22][None, :, :])  # (Nc, 22, 2)
                                             if proj_idx < proj.shape[0]:
-                                                xy = proj[proj_idx, 0]  # (22, 2)
+                                                xy = proj[proj_idx]  # (22, 2)
                                                 for a, b in smplx_body_edges:
                                                     if a < 22 and b < 22:
                                                         pa = xy[a]; pb = xy[b]
