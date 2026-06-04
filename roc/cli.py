@@ -438,7 +438,7 @@ def main() -> None:
                 vposer_dir=args.retarget_vposer_dir,
                 device=retarget_device,
                 betas_steps=args.retarget_betas_steps,
-                pose_steps=args.retarget_pose_steps,
+                pose_steps=args.retarget_pose_steps if args.retarget_pose_steps is not None else 120,
                 root_steps=args.retarget_root_steps,
                 lower_steps=args.retarget_lower_steps,
                 lower_body_refine=not args.retarget_no_lower_refine,

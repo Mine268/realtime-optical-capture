@@ -169,6 +169,32 @@ Track vs fit body error comparison (body joints 0-21, mm):
 - Camera ordering in npz arrays (`camera_serials`) reflects the calibrated order, not the capture order
 - Calibration coordinate units are millimeters; SMPL-X retargeting scales input by `--retarget-input-scale` (default 0.001) to convert to meters
 
+### Preview mode (`--show-preview`)
+
+When `--show-preview` is used with track mode, the OpenCV window shows:
+- **Green dots**: MediaPipe 2D pose detections per camera
+- **Cyan skeleton**: SMPL-X body joints (0-21) projected via camera calibration
+
+The SMPL-X skeleton FK is computed from the tracker's latest output and reprojected in real time.  The preview is generated after tracker update so the SMPL-X output is available.
+
+### Hip direction angle loss
+
+`_hip_direction_angle_loss` (weight 0.10) penalises the cosine distance between the SMPL-X left-right hip vector and the MediaPipe target hip direction in 3D.  This directly constrains the hip axis orientation, reducing the hip direction deviation from 37 frames (>15°) to 0 (excluding early recovery frames).
+
+### Pelvis robustness at low FPS
+
+When capture frame rate is low (e.g. wxk session), MediaPipe may swap left/right hip detections.  Two conditional protections:
+
+1. **Hip swap detection**: compares current target hip XY-plane direction with previous SMPL-X prediction.  If deviation exceeds ~70° (cos < 0.3), hip+leg target landmarks are down-weighted 20x to prevent the optimizer from chasing bad data.
+
+2. **Conditional pelvis rotation clamp**: when hip swap is detected, pelvis rotation is soft-clamped to ~15°/frame to prevent catastrophic pelvis flipping (was observed spinning to -339° on wxk).
+
+Both protections are conditional — they activate only when hip direction is unreliable, with no effect on normal frames.
+
+### Fit mode CLI fix
+
+The `--retarget-pose-steps` CLI argument defaults to `None` for track mode (uses `RetargetConfig.track_pose_steps=30`).  For fit mode, it defaults to 120.  Previously `min(args, 20)` hardcoded track steps to 20 regardless of config.
+
 ### Environment requirements
 
 - MVS SDK at `/opt/MVS/` with Python bindings at `/opt/MVS/Samples/64/Python/MvImport/`
